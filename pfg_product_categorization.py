@@ -17,9 +17,13 @@ from azure.search.documents.indexes.models import (
     AzureOpenAIVectorizerParameters
 )
 from azure.core.credentials import AzureKeyCredential
+from azure.core.pipeline.policies import RetryPolicy
 from dotenv import load_dotenv
+import time
 
 load_dotenv(override=True)
+batch_size = 15  # Adjust batch size based on your dataset
+max_retries = 3
 
 # Azure OpenAI credentials
 azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")  # Replace with your Azure OpenAI endpoint
@@ -82,13 +86,14 @@ def create_embedding_index(filtered_data, search_client):
     # Prepare documents for upload
     documents = []
     for idx, row in filtered_data.iterrows():
-        embedding = generate_embedding(row["Hierarchy Detail"])
+        text_to_embed = f"{row['Class_Name']} {row['PBH']} {row['Hierarchy Detail']}"
+        hierarchy_embedding = generate_embedding(text_to_embed)
         documents.append({
             "id": str(row["Item_Num"]),
             "hierarchy_path": row["Hierarchy Detail"],
             "class_name": row["Class_Name"],
             "pbh": row["PBH"],
-            "embedding": embedding,
+            "embedding": hierarchy_embedding,
             "hierarchy_cd": row["Analytical_Hierarchy"]
         })
 
@@ -140,7 +145,7 @@ def create_embedding_index(filtered_data, search_client):
     search_index_client.create_or_update_index(index=index_schema)
 
     # Upload documents in batches
-    batch_size = 100
+    batch_size = 15
 
     for i in range(0, len(documents), batch_size):
         batch = documents[i:i + batch_size]
@@ -172,27 +177,130 @@ def vector_search(query):
 
     return results
 
- # vector_search("DAIRY PROD & SUBS CHEESE CHEESE FRENCH") # = 1687 is False
+# vector_search("DAIRY PROD & SUBS CHEESE CHEESE FRENCH") # = 1687 is False
 # vector_search("PRODUCE PRE-CUT VEGETABLEs PRE-CUT VEGETABLE BLEND ROASTING CAULIFLOWER BUTTERNUT RED PEARL ONION BRUSSEL SPROUT") # should be 2539
 # vector_search("CHEMICALS & CLEANING FOOD SAFETY & KITCHEN CLN GREASE CARTRIDGE FOOD GRADE") # should be 1121
+# 1011979       	2024-10-25 10:22:03.8120000	Approved	elafler4210	DISPLAY COUNTER UNIT COUGH DROP	NULL	00036602834224	3012          	RICOLA	NULL	DISPLAY COUNTER UNIT COUGH DROP	30	45   	GM	14            	MISCELLANEOUS	9999	MISCELLANEOUS USE	954           	42.00	80.00	NULL	NULL
+# should be DISPOSABLES>>HEALTHCARE>>MISCELLANEOUS
+
+# Define the function to choose the best hierarchy path
+def choose_best_hierarchy_path(long_product_name, pbh, class_name, predictions):
+    """
+    Uses GPT-4 to reason and choose the best hierarchy path from the top predictions.
+    
+    Args:
+        long_product_name (str): The long product name.
+        pbh (str): The PBH (Product Business Hierarchy) value.
+        class_name (str): The product class name.
+        predictions (list[dict]): A list of dictionaries containing 'hierarchy_cd' and 'hierarchy_path'.
+    
+    Returns:
+        str: The best matching hierarchy_cd chosen by GPT-4.
+    """
+    # Construct the GPT-4 prompt
+    prompt = f"""
+    You are an expert in product categorization and hierarchy matching. Your task is to evaluate which of the given hierarchy paths best matches a product's details. Use the product's Long Product Name, PBH, and Class Name to guide your reasoning.
+
+    Each prediction is associated with a Hierarchy CD and its full path. Evaluate the predictions based on the following criteria:
+        1. Relevance to the Class Name.
+        2. Alignment with the PBH (Product Business Hierarchy).
+        3. Consistency with the Long Product Name.
+
+    For each prediction, use your reasoning to analyze how well it matches the product details. Then, based on your analysis, select the Hierarchy CD that provides the most accurate categorization.
+
+    **Few-Shot Examples:**
+
+    **Example 1:**
+    - Class Name: "DISPOSABLES"
+    - PBH: "CARTONS/CONTAINERS/TRAYS"
+    - Long Product Name: "BOX PIZZA 16" WHITE_KRAFT"
+    - Search Results:
+        1. Hierarchy CD: "2024", Path: "DISPOSABLES>>CONTAINERS/TO GO>>PAPER>>FOOD TRAY"
+        2. Hierarchy CD: "298", Path: "DISPOSABLES>>BOX & ACCESSORIES>>PIZZA>>PIZZA BOX"
+        3. Hierarchy CD: "298", Path: "DISPOSABLES>>BOX & ACCESSORIES>>PIZZA>>PIZZA BOX"
+
+    **Best Hierarchy CD:** 298
+
+    ---
+
+    **Example 2:**
+    - Class Name: "FROZEN FOOD PROCESS"
+    - PBH: "APPETIZERS/HORS D OEUVRES"
+    - Long Product Name: "EGG ROLL PIZZA PEPPERONI"
+    - Search Results:
+        1. Hierarchy CD: "1013", Path: "BAKERY, FROZEN>>PRETZELS>>THAW & SERVE"
+        2. Hierarchy CD: "1013", Path: "BAKERY, FROZEN>>PRETZELS>>THAW & SERVE"
+        3. Hierarchy CD: "2341", Path: "BAKERY, FROZEN>>PIZZA CRUSTS>>DOUGH BALL"
+
+    **Best Hierarchy CD:** 1139
+
+    **Example 3:**
+    - Class Name: "DAIRY PROD & SUBS"
+    - PBH: "MILKS/CREAMS/YOGURT"
+    - Long Product Name: "EGGNOG ULTRA-HIGH-TEMPERATURE 32OZ PAPER CARTON"
+    - Search Results:
+        1. Hierarchy CD: "1420", Path: "CHEESE & DAIRY>>MILK & CREAMERS>>SOY & OTHER MILKS"
+        2. Hierarchy CD: "2652", Path: "CHEESE & DAIRY>>MILK & CREAMERS>>FLUID MILK>>EGG NOG"
+        3. Hierarchy CD: "2652", Path: "CHEESE & DAIRY>>MILK & CREAMERS>>FLUID MILK>>EGG NOG"
+
+    **Best Hierarchy CD:** 2652
+
+
+    **Output Requirements:**
+    - Provide only the best Hierarchy CD as a single number. Do not include any additional text or reasoning in your response.
+
+    **Input Details:**
+"""
+
+    # Add the predictions to the prompt
+    for i, prediction in enumerate(predictions):
+        prompt += f"{i+1}. Hierarchy CD: {prediction['hierarchy_cd']}, Path: {prediction['hierarchy_path']}\n"
+
+
+
+    # Call GPT-4
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "You are an expert in product categorization."},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=5000,  # Limit tokens to focus on reasoning and decision
+        temperature=0  # Set to 0 for deterministic output
+    )
+
+    # Extract the chosen Hierarchy CD from GPT-4's response
+    chosen_hierarchy_cd = response.choices[0].message.content
+    return chosen_hierarchy_cd
 
 # Save predictions
 def save_predictions(items, filename):
     items.to_excel(filename, index=False, engine='openpyxl')
 
-def run_test(data):
+def run_test(data, max_retries=3, retry_backoff=5):
     predicted_hierarchies = []
 
-    for idx, row in data.iterrows():
-        results = vector_search(row["Class_Name"] + " " + row["PBH"] + " " + row["Long_Product_Name"])
-        tmp = []
-        # Create a list to store the predicted values
+    for idx, row in data.iterrows(): 
+        retries = max_retries
+        prediction = None
 
-        for result in results:
-            tmp.append(result["hierarchy_cd"]) 
-        predicted_hierarchies.append(tmp)    
+        while retries > 0:
+            try:
+                search_results = vector_search(row["Class_Name"] + " " + row["PBH"] + " " + row["Long_Product_Name"])
+                prediction = choose_best_hierarchy_path(row["Long_Product_Name"], row["PBH"], row["Class_Name"], search_results)
+                break
+            except Exception as e:
+                print(f"Error occurred for item {row['Item_Num']}: {e}")
+                retries -= 1
+                if retries > 0:
+                    print(f"Retrying... {max_retries - retries + 1}/{max_retries}")
+                    time.sleep(retry_backoff ** (max_retries - retries))  # Exponential backoff
+                else:
+                    print(f"Max retries reached for row {idx}. Skipping...")
+
+        predicted_hierarchies.append(prediction)   
         
-        if idx == 15:
+        if idx == 200:
             break
     # Add the predicted values as a new column to the DataFrame
     data = data.assign(Predicted_Hierarchy_CD=predicted_hierarchies)
@@ -208,7 +316,7 @@ def main():
     #create_embedding_index(october_items, search_client)
 
     # Step 3: Query the model for each item
-    results = run_test(october_items.head(15))
+    results = run_test(october_items.head(200))
 
     save_predictions(results, "predicted_october_items.xlsx")
 
