@@ -28,8 +28,15 @@ max_retries = 3
 # Azure OpenAI credentials
 azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")  # Replace with your Azure OpenAI endpoint
 azure_openai_key = os.getenv("AZURE_OPENAI_KEY")  # Replace with your Azure OpenAI API key
-text_embedding_model = os.getenv("AZURE_OPENAI_TEXT_EMBEDDING_MODEL")
 azure_api_version = os.getenv("AZURE_OPENAI_API_VERSION")
+
+openai_deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+openai_model_name = os.getenv("AZURE_OPENAI_MODEL_NAME")
+
+text_embedding_deployment_name = os.getenv("AZURE_OPENAI_TEXT_EMBEDDING_DEPLOYMENT_NAME")
+text_embedding_model_name = os.getenv("AZURE_OPENAI_TEXT_EMBEDDING_MODEL_NAME")
+
+# Initialize the Azure OpenAI client
 client = AzureOpenAI(
             azure_endpoint=azure_openai_endpoint,
             api_version=azure_api_version,
@@ -58,20 +65,25 @@ def load_data():
     october_items["Analytical_Hierarchy"] = october_items["Analytical_Hierarchy"].str.strip() # Remove leading/trailing whitespaces
     item_hierarchy["Hierarchy CD"] = item_hierarchy["Hierarchy CD"].astype(str).str.strip() # Remove leading/trailing whitespaces
 
-    approved_october_items = october_items[october_items['Status'] == 'Approved'] # Filter approved items
-    approved_october_items = approved_october_items[['Item_Num', 'Brand_Name', 'Long_Product_Name', 'Class_Name', 'PBH', 'Analytical_Hierarchy']] # Select relevant columns
+    approved_october_items = filter_and_merge_items(october_items, 'Approved', item_hierarchy)
+    initiated_october_items = filter_and_merge_items(october_items, 'Initiated', item_hierarchy)
 
+    return analytical_hierarchy, item_hierarchy, approved_october_items, initiated_october_items
+
+
+# Filter and merge items based on status and hierarchy
+def filter_and_merge_items(items, status, item_hierarchy):
+    filtered_items = items[items['Status'] == status]
+    filtered_items = filtered_items[['Item_Num', 'Brand_Name', 'Long_Product_Name', 'Class_Name', 'PBH', 'Analytical_Hierarchy']]
     merged_data = pd.merge(
-    approved_october_items,
-    item_hierarchy,
-    left_on="Analytical_Hierarchy",
-    right_on="Hierarchy CD",
-    how="inner"  # Use "inner" to keep only matching rows
+        filtered_items,
+        item_hierarchy,
+        left_on="Analytical_Hierarchy",
+        right_on="Hierarchy CD",
+        how="inner"
     )
+    return merged_data
 
-    # print(merged_data.head())
-
-    return analytical_hierarchy, item_hierarchy, merged_data
 
 # Generate embeddings for each item
 def generate_embedding(text):
@@ -79,7 +91,7 @@ def generate_embedding(text):
     Generate embeddings using Azure OpenAI
     """
 
-    return client.embeddings.create(input = [text], model=text_embedding_model).data[0].embedding
+    return client.embeddings.create(input = [text], model=text_embedding_model_name).data[0].embedding
 
 # Create an index in Azure Cognitive Search
 def create_embedding_index(filtered_data, search_client):
@@ -90,13 +102,41 @@ def create_embedding_index(filtered_data, search_client):
         hierarchy_embedding = generate_embedding(text_to_embed)
         documents.append({
             "id": str(row["Item_Num"]),
-            "hierarchy_path": row["Hierarchy Detail"],
+            
+            # TODO update the embedding index to be on more fields: 
+            # Brand_Id
+            # Description_1	
+            # Description_2	
+            # GTIN	
+            # Brand_Id	
+            # Brand_Name	
+            # GDSN_Brand	
+            # Long_Product_Name	<-
+            # Pack	
+            # Size	
+            # Size_UOM	
+            # Class_Id	
+            # Class_Name	<-
+            # PBH_ID	
+            # PBH	<-
+            # Analytical_Hierarchy_cd	<-
+            # Analytical_Hierarchy	<-
+            # Temp_Min	
+            # Temp_Max	
+            # Benefits	
+            # General_Description
+            
+            
             "class_name": row["Class_Name"],
             "pbh": row["PBH"],
-            "embedding": hierarchy_embedding,
-            "hierarchy_cd": row["Analytical_Hierarchy"]
+            "hierarchy_cd": row["Analytical_Hierarchy"],
+            "hierarchy_path": row["Hierarchy Detail"],
+
+            "embedding": hierarchy_embedding
         })
 
+    # TODO add Semantic Configuration to the index
+    
     # Configure the vector search configuration  
     vector_search = VectorSearch(
         algorithms=[
@@ -116,8 +156,8 @@ def create_embedding_index(filtered_data, search_client):
                 vectorizer_name="myVectorizer",
                 parameters=AzureOpenAIVectorizerParameters(
                     resource_url=azure_openai_endpoint,
-                    deployment_name="klauopenai",
-                    model_name="text-embedding-ada-002",
+                    deployment_name=text_embedding_deployment_name,
+                    model_name=text_embedding_model_name,
                     api_key=azure_openai_key
                 )
             )
@@ -127,14 +167,39 @@ def create_embedding_index(filtered_data, search_client):
 
     # Define the embedding index schema
     index_schema = SearchIndex(
-        name="hierarchy-index",
+        name=index_name,
         fields=[
             SimpleField(name="id", type=SearchFieldDataType.String, key=True, sortable=True, filterable=True, facetable=True),
-            SearchField(name="hierarchy_path",  type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
+            
+            # TODO update the embedding index to be on more fields: 
+            # Brand_Id
+            # Description_1	
+            # Description_2	
+            # GTIN	
+            # Brand_Id	
+            # Brand_Name	
+            # GDSN_Brand	
+            # Long_Product_Name	<-
+            # Pack	
+            # Size	
+            # Size_UOM	
+            # Class_Id	
+            # Class_Name	<-
+            # PBH_ID	
+            # PBH	<-
+            # Analytical_Hierarchy_cd	<-
+            # Analytical_Hierarchy	<-
+            # Temp_Min	
+            # Temp_Max	
+            # Benefits	
+            # General_Description
+            
             SearchField(name="class_name",  type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
             SearchField(name="pbh",  type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
-            SearchField(name="embedding", type=SearchFieldDataType.Collection(SearchFieldDataType.Single), vector_search_dimensions=1536, vector_search_profile_name="myHnswProfile"),
-            SimpleField(name="hierarchy_cd", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True) 
+            SimpleField(name="hierarchy_cd", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True), 
+            SearchField(name="hierarchy_path",  type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
+            
+            SearchField(name="embedding", type=SearchFieldDataType.Collection(SearchFieldDataType.Single), vector_search_dimensions=1536, vector_search_profile_name="myHnswProfile")
         ],
         vector_search=vector_search
     )
@@ -256,11 +321,9 @@ def choose_best_hierarchy_path(long_product_name, pbh, class_name, predictions):
     for i, prediction in enumerate(predictions):
         prompt += f"{i+1}. Hierarchy CD: {prediction['hierarchy_cd']}, Path: {prediction['hierarchy_path']}\n"
 
-
-
-    # Call GPT-4
+    # Call GPT-4o
     response = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=openai_model_name,
         messages=[
             {"role": "system", "content": "You are an expert in product categorization."},
             {"role": "user", "content": prompt}
@@ -273,10 +336,6 @@ def choose_best_hierarchy_path(long_product_name, pbh, class_name, predictions):
     chosen_hierarchy_cd = response.choices[0].message.content
     return chosen_hierarchy_cd
 
-# Save predictions
-def save_predictions(items, filename):
-    items.to_excel(filename, index=False, engine='openpyxl')
-
 def run_test(data, max_retries=3, retry_backoff=5):
     predicted_hierarchies = []
 
@@ -286,7 +345,32 @@ def run_test(data, max_retries=3, retry_backoff=5):
 
         while retries > 0:
             try:
+                # TODO update the vector search to be on more fields: 
+                # Brand_Id
+                # Description_1	
+                # Description_2	
+                # GTIN	
+                # Brand_Id	
+                # Brand_Name	
+                # GDSN_Brand	
+                # Long_Product_Name	<-
+                # Pack	
+                # Size	
+                # Size_UOM	
+                # Class_Id	
+                # Class_Name	<-
+                # PBH_ID	
+                # PBH	<-
+                # Analytical_Hierarchy_cd	<-
+                # Analytical_Hierarchy	<-
+                # Temp_Min	
+                # Temp_Max	
+                # Benefits	
+                # General_Description
+
                 search_results = vector_search(row["Class_Name"] + " " + row["PBH"] + " " + row["Long_Product_Name"])
+                
+                # TODO make predictions for the Three fields, Class, PBH, and Analytical_Hierarchy
                 prediction = choose_best_hierarchy_path(row["Long_Product_Name"], row["PBH"], row["Class_Name"], search_results)
                 break
             except Exception as e:
@@ -308,17 +392,60 @@ def run_test(data, max_retries=3, retry_backoff=5):
     return data
 
 
+# Save predictions
+def save_predictions(items, filename):
+    items.to_excel(filename, index=False, engine='openpyxl')
+
+
+# Evaluate the predictions using the ground truth data
+def evaluate_predictions(predictions, ground_truth_data):
+    hierarchy_correct = 0
+    total_predictions = len(predictions)
+
+    class_name_correct = 0
+    pbh_correct = 0
+
+    for _, row in predictions.iterrows():
+        item_num = row["Item_Num"]
+        
+        if row["Class_Name"] == ground_truth_data.loc[ground_truth_data["Item_Num"] == item_num, "Class_Name"].values[0]:
+            class_name_correct += 1
+
+        if row["PBH"] == ground_truth_data.loc[ground_truth_data["Item_Num"] == item_num, "PBH"].values[0]:
+            pbh_correct += 1
+        
+        predicted_hierarchy = str(row["Predicted_Hierarchy_CD"])  # Convert to string
+        ground_truth_hierarchy = str(ground_truth_data.loc[ground_truth_data["Item_Num"] == item_num, "Hierarchy CD"].values[0])  # Convert to string
+        if predicted_hierarchy == ground_truth_hierarchy:
+            hierarchy_correct += 1
+
+    hierarchy_accuracy = hierarchy_correct / total_predictions
+    class_name_accuracy = class_name_correct / total_predictions
+    pbh_accuracy = pbh_correct / total_predictions
+    overall_accuracy = (class_name_correct + pbh_correct + hierarchy_correct) / (3 * total_predictions)
+
+    print(f"Class Name Accuracy: {class_name_accuracy:.2%}")
+    print(f"PBH Accuracy: {pbh_accuracy:.2%}")
+    print(f"Hierarchy Accuracy: {hierarchy_accuracy:.2%}")
+    print(f"Overall Accuracy: {overall_accuracy:.2%}")
+
+
 def main():
-     # Step 1: Load the data
-    analytical_hierarchy, item_hierarchy, october_items = load_data()
+    # Step 1: Load the data, get the approved and initiated items
+    # analytical_hierarchy, item_hierarchy, approved_october_items, initiated_october_items = load_data()
+    # TODO save the approved_october_items and initiated_october_items to files
 
-    # Step 2: Build an index of items with embeddings
-    #create_embedding_index(october_items, search_client)
+    # Step 2: Build an index of items with embeddings around the Approved items
+    # create_embedding_index(approved_october_items, search_client)
 
-    # Step 3: Query the model for each item
-    results = run_test(october_items.head(200))
+    # Step 3: Query the model for each Initiated item, predict the Class, PBH, Analytical_Hierarchy, and save the results
+    # TODO test with up to ~2220 items
+    # results = run_test(initiated_october_items.head(200))
+    # save_predictions(results, "predicted_october_items.xlsx") # Save the predictions
 
-    save_predictions(results, "predicted_october_items.xlsx")
+    # Step 4: Evaluate the predictions
+    # predicted_items = pd.read_excel("predicted_october_items.xlsx", engine="openpyxl") # Load the saved predictions
+    # evaluate_predictions(predicted_items, approved_october_items) # Evaluate the predictions
 
 if __name__ == "__main__":
     # Apply this function to extract matching rows for each item
