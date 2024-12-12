@@ -1,0 +1,7 @@
+azure-core
+pandas
+requests
+openai
+azure-search-documents
+python-dotenv
+openpyxl
