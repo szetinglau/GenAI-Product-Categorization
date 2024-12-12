@@ -75,6 +75,29 @@ def load_data():
 def filter_and_merge_items(items, status, item_hierarchy):
     filtered_items = items[items['Status'] == status]
     filtered_items = filtered_items[['Item_Num', 'Brand_Name', 'Long_Product_Name', 'Class_Name', 'PBH', 'Analytical_Hierarchy']]
+    # TODO update the filtered_items to include more fields:
+        # Brand_Id
+        # Description_1	
+        # Description_2	
+        # GTIN	
+        # Brand_Id	
+        # Brand_Name	
+        # GDSN_Brand	
+        # Long_Product_Name	<-
+        # Pack	
+        # Size	
+        # Size_UOM	
+        # Class_Id	
+        # Class_Name	<-
+        # PBH_ID	
+        # PBH	<-
+        # Analytical_Hierarchy_cd	<-
+        # Analytical_Hierarchy	<-
+        # Temp_Min	
+        # Temp_Max	
+        # Benefits	
+        # General_Description
+
     merged_data = pd.merge(
         filtered_items,
         item_hierarchy,
@@ -263,6 +286,7 @@ def choose_best_hierarchy_path(long_product_name, pbh, class_name, predictions):
         str: The best matching hierarchy_cd chosen by GPT-4.
     """
     # Construct the GPT-4 prompt
+    # TODO Correct and improve the few shot examples in the prompt
     prompt = f"""
     You are an expert in product categorization and hierarchy matching. Your task is to evaluate which of the given hierarchy paths best matches a product's details. Use the product's Long Product Name, PBH, and Class Name to guide your reasoning.
 
@@ -432,7 +456,7 @@ def evaluate_predictions(predictions, ground_truth_data):
 
 def main():
     # Step 1: Load the data, get the approved and initiated items
-    # analytical_hierarchy, item_hierarchy, approved_october_items, initiated_october_items = load_data()
+    analytical_hierarchy, item_hierarchy, approved_october_items, initiated_october_items = load_data()
     # TODO save the approved_october_items and initiated_october_items to files
 
     # Step 2: Build an index of items with embeddings around the Approved items
