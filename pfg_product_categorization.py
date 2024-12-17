@@ -1,4 +1,5 @@
 from azure.core.exceptions import HttpResponseError
+
 import pandas as pd
 import requests, json, os
 from openai import AzureOpenAI
@@ -6,6 +7,9 @@ from azure.search.documents import SearchClient
 from azure.search.documents.models import VectorizedQuery, VectorizableTextQuery
 from azure.search.documents.indexes import SearchIndexClient
 from azure.search.documents.indexes.models import (
+    SemanticConfiguration,
+    PrioritizedFields,
+    SemanticField,
     SearchField,
     SimpleField,
     SearchFieldDataType,
@@ -74,29 +78,30 @@ def load_data():
 # Filter and merge items based on status and hierarchy
 def filter_and_merge_items(items, status, item_hierarchy):
     filtered_items = items[items['Status'] == status]
-    filtered_items = filtered_items[['Item_Num', 'Brand_Name', 'Long_Product_Name', 'Class_Name', 'PBH', 'Analytical_Hierarchy']]
-    # TODO update the filtered_items to include more fields:
-        # Brand_Id
-        # Description_1	
-        # Description_2	
-        # GTIN	
-        # Brand_Id	
-        # Brand_Name	
-        # GDSN_Brand	
-        # Long_Product_Name	<-
-        # Pack	
-        # Size	
-        # Size_UOM	
-        # Class_Id	
-        # Class_Name	<-
-        # PBH_ID	
-        # PBH	<-
-        # Analytical_Hierarchy_cd	<-
-        # Analytical_Hierarchy	<-
-        # Temp_Min	
-        # Temp_Max	
-        # Benefits	
-        # General_Description
+    filtered_items = filtered_items[[
+        'Item_Num', 
+        'Description_1',
+        'Description_2',
+        'GTIN',
+        'Brand_Id',
+        'Brand_Name',
+        'GDSN_Brand',
+        'Long_Product_Name',
+        'Pack',
+        'Size',
+        'Size_UOM',
+        'Class_Id',
+        'Class_Name',
+        'PBH_ID',
+        'PBH',
+        'Analytical_Hierarchy_cd',
+        'Analytical_Hierarchy',
+        'Temp_Min',
+        'Temp_Max',
+        'Benefits',
+        'General_Description'
+    ]]
+
 
     merged_data = pd.merge(
         filtered_items,
@@ -113,53 +118,63 @@ def generate_embedding(text):
     """
     Generate embeddings using Azure OpenAI
     """
+    try:
+        response = client.embeddings.create(input=[text], model=text_embedding_model_name)
+        return response.data[0].embedding
+    except Exception as e:
+        print(f"Embedding generation failed: {e}")
+        return None
 
-    return client.embeddings.create(input = [text], model=text_embedding_model_name).data[0].embedding
 
 # Create an index in Azure Cognitive Search
 def create_embedding_index(filtered_data, search_client):
     # Prepare documents for upload
     documents = []
-    for idx, row in filtered_data.iterrows():
-        text_to_embed = f"{row['Class_Name']} {row['PBH']} {row['Hierarchy Detail']}"
+    for _, row in filtered_data.iterrows():
+        fields = [
+            "Item_Num", "Description_1", "Description_2", "GTIN", "Brand_Id", "Brand_Name", 
+            "GDSN_Brand", "Long_Product_Name", "Pack", "Size", "Size_UOM", "Class_Id", 
+            "Class_Name", "PBH_ID", "PBH", "Analytical_Hierarchy_cd", "Analytical_Hierarchy", 
+            "Temp_Min", "Temp_Max", "Benefits", "General_Description"
+        ]
+
+        # Filter the fields to be used for embedding
+        embedding_fields = [
+            "Item_Num", "Brand_Id", "Brand_Name", "GDSN_Brand", "Long_Product_Name", 
+            "Class_Id", "Class_Name", "PBH_ID", "PBH", "Analytical_Hierarchy_cd", 
+            "Analytical_Hierarchy", "Temp_Min", "Temp_Max", "Benefits", "General_Description"
+        ]
+        
+        text_to_embed = " ".join(str(row[field]) for field in embedding_fields)
         hierarchy_embedding = generate_embedding(text_to_embed)
-        documents.append({
-            "id": str(row["Item_Num"]),
-            
-            # TODO update the embedding index to be on more fields: 
-            # Brand_Id
-            # Description_1	
-            # Description_2	
-            # GTIN	
-            # Brand_Id	
-            # Brand_Name	
-            # GDSN_Brand	
-            # Long_Product_Name	<-
-            # Pack	
-            # Size	
-            # Size_UOM	
-            # Class_Id	
-            # Class_Name	<-
-            # PBH_ID	
-            # PBH	<-
-            # Analytical_Hierarchy_cd	<-
-            # Analytical_Hierarchy	<-
-            # Temp_Min	
-            # Temp_Max	
-            # Benefits	
-            # General_Description
-            
-            
-            "class_name": row["Class_Name"],
-            "pbh": row["PBH"],
-            "hierarchy_cd": row["Analytical_Hierarchy"],
-            "hierarchy_path": row["Hierarchy Detail"],
+        document = {
+            "id": str(row["Item_Num"])
+        }
+        for field in fields:
+            document[field] = row[field]
+        
+        document["embedding"] = hierarchy_embedding # Add the embedding field to the document
+        documents.append(document)
 
-            "embedding": hierarchy_embedding
-        })
+    # Define the semantic configuration
+    semantic_config = SemanticConfiguration(
+        name="mySemanticConfig",
+        prioritized_fields=PrioritizedFields(
+            title_field=None,
+            prioritized_content_fields=[
+                SemanticField(field_name="Brand_Name"),
+                SemanticField(field_name="GDSN_Brand"),
+                SemanticField(field_name="Long_Product_Name"),
+                SemanticField(field_name="Class_Name"),
+                SemanticField(field_name="PBH"),
+                SemanticField(field_name="Analytical_Hierarchy"),
+                SemanticField(field_name="Benefits"),
+                SemanticField(field_name="General_Description")
+            ],
+            prioritized_keywords_fields=None
+        )
+    )
 
-    # TODO add Semantic Configuration to the index
-    
     # Configure the vector search configuration  
     vector_search = VectorSearch(
         algorithms=[
@@ -187,44 +202,39 @@ def create_embedding_index(filtered_data, search_client):
         ]
     )
 
-
     # Define the embedding index schema
     index_schema = SearchIndex(
         name=index_name,
         fields=[
             SimpleField(name="id", type=SearchFieldDataType.String, key=True, sortable=True, filterable=True, facetable=True),
             
-            # TODO update the embedding index to be on more fields: 
-            # Brand_Id
-            # Description_1	
-            # Description_2	
-            # GTIN	
-            # Brand_Id	
-            # Brand_Name	
-            # GDSN_Brand	
-            # Long_Product_Name	<-
-            # Pack	
-            # Size	
-            # Size_UOM	
-            # Class_Id	
-            # Class_Name	<-
-            # PBH_ID	
-            # PBH	<-
-            # Analytical_Hierarchy_cd	<-
-            # Analytical_Hierarchy	<-
-            # Temp_Min	
-            # Temp_Max	
-            # Benefits	
-            # General_Description
-            
-            SearchField(name="class_name",  type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
-            SearchField(name="pbh",  type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
-            SimpleField(name="hierarchy_cd", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True), 
-            SearchField(name="hierarchy_path",  type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
+            # Update the embedding index to be on all fields
+            SimpleField(name="Item_Num", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True),
+            SearchField(name="Description_1", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
+            SearchField(name="Description_2", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
+            SimpleField(name="GTIN", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True),
+            SimpleField(name="Brand_Id", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True),
+            SearchField(name="Brand_Name", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
+            SearchField(name="GDSN_Brand", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
+            SearchField(name="Long_Product_Name", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
+            SimpleField(name="Pack", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True),
+            SimpleField(name="Size", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True),
+            SimpleField(name="Size_UOM", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True),
+            SimpleField(name="Class_Id", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True),
+            SearchField(name="Class_Name", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
+            SimpleField(name="PBH_ID", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True),
+            SearchField(name="PBH", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
+            SimpleField(name="Analytical_Hierarchy_cd", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True),
+            SearchField(name="Analytical_Hierarchy", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
+            SimpleField(name="Temp_Min", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True),
+            SimpleField(name="Temp_Max", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True),
+            SearchField(name="Benefits", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
+            SearchField(name="General_Description", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
             
             SearchField(name="embedding", type=SearchFieldDataType.Collection(SearchFieldDataType.Single), vector_search_dimensions=1536, vector_search_profile_name="myHnswProfile")
         ],
-        vector_search=vector_search
+        vector_search=vector_search,
+        semantic_configurations=[semantic_config]  # Add the semantic configuration to the index
     )
 
     # Create the index in Azure Cognitive Search
@@ -369,28 +379,30 @@ def run_test(data, max_retries=3, retry_backoff=5):
 
         while retries > 0:
             try:
+                # TODO See about leveraging L2 Reranker and QR to improve the search results: https://techcommunity.microsoft.com/blog/azure-ai-services-blog/raising-the-bar-for-rag-excellence-query-rewriting-and-new-semantic-ranker/4302729 
+
                 # TODO update the vector search to be on more fields: 
-                # Brand_Id
-                # Description_1	
-                # Description_2	
-                # GTIN	
-                # Brand_Id	
-                # Brand_Name	
-                # GDSN_Brand	
-                # Long_Product_Name	<-
-                # Pack	
-                # Size	
-                # Size_UOM	
-                # Class_Id	
-                # Class_Name	<-
-                # PBH_ID	
-                # PBH	<-
-                # Analytical_Hierarchy_cd	<-
-                # Analytical_Hierarchy	<-
-                # Temp_Min	
-                # Temp_Max	
-                # Benefits	
-                # General_Description
+                # 'Item_Num', 
+                # 'Description_1',
+                # 'Description_2',
+                # 'GTIN',
+                # 'Brand_Id',
+                # 'Brand_Name',
+                # 'GDSN_Brand',
+                # 'Long_Product_Name',
+                # 'Pack',
+                # 'Size',
+                # 'Size_UOM',
+                # 'Class_Id',
+                # 'Class_Name',
+                # 'PBH_ID',
+                # 'PBH',
+                # 'Analytical_Hierarchy_cd',
+                # 'Analytical_Hierarchy',
+                # 'Temp_Min',
+                # 'Temp_Max',
+                # 'Benefits',
+                # 'General_Description'
 
                 search_results = vector_search(row["Class_Name"] + " " + row["PBH"] + " " + row["Long_Product_Name"])
                 
@@ -460,16 +472,16 @@ def main():
     # TODO save the approved_october_items and initiated_october_items to files
 
     # Step 2: Build an index of items with embeddings around the Approved items
-    # create_embedding_index(approved_october_items, search_client)
+    create_embedding_index(approved_october_items, search_client)
 
     # Step 3: Query the model for each Initiated item, predict the Class, PBH, Analytical_Hierarchy, and save the results
-    # TODO test with up to ~2220 items
-    # results = run_test(initiated_october_items.head(200))
-    # save_predictions(results, "predicted_october_items.xlsx") # Save the predictions
+    # TODO test with up to ~2220 items and get accuracies for Class, PBH, and Analytical_Hierarchy
+    results = run_test(initiated_october_items.head(200))
+    save_predictions(results, "predicted_october_items.xlsx") # Save the predictions
 
     # Step 4: Evaluate the predictions
-    # predicted_items = pd.read_excel("predicted_october_items.xlsx", engine="openpyxl") # Load the saved predictions
-    # evaluate_predictions(predicted_items, approved_october_items) # Evaluate the predictions
+    predicted_items = pd.read_excel("predicted_october_items.xlsx", engine="openpyxl") # Load the saved predictions
+    evaluate_predictions(predicted_items, approved_october_items) # Evaluate the predictions
 
 if __name__ == "__main__":
     # Apply this function to extract matching rows for each item
