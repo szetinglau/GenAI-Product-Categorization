@@ -5,3 +5,4 @@ openai
 azure-search-documents
 python-dotenv
 openpyxl
+tenacity

@@ -1,4 +1,5 @@
 
+import openai
 import pandas as pd
 import numpy as np
 import requests, json, os
@@ -28,10 +29,9 @@ from azure.core.pipeline.policies import RetryPolicy
 from dotenv import load_dotenv
 from openai import AzureOpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
+from pydantic import BaseModel
 
 load_dotenv(override=True)
-batch_size = 15  # Adjust batch size based on your dataset
-max_retries = 3
 
 # Azure OpenAI credentials
 azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")  # Replace with your Azure OpenAI endpoint
@@ -56,6 +56,14 @@ search_service_endpoint = os.getenv("SEARCH_SERVICE_ENDPOINT")  # Replace with y
 search_api_key = os.getenv("SEARCH_API_KEY")  # Replace with your Azure Cognitive Search API key
 index_name = os.getenv("SEARCH_INDEX_NAME")  # Replace with your Azure Cognitive Search index name
 search_client = SearchClient(endpoint=search_service_endpoint, index_name=index_name, credential=AzureKeyCredential(search_api_key))
+
+# Define the fields to be used for embedding and search
+fields = [
+    "Item_Num", "Description_1", "Description_2", "GTIN", "Brand_Id", "Brand_Name", 
+    "GDSN_Brand", "Long_Product_Name", "Pack", "Size", "Size_UOM", "Class_Id", 
+    "Class_Name", "PBH_ID", "PBH", "Analytical_Hierarchy_CD", "Analytical_Hierarchy", 
+    "Temp_Min", "Temp_Max", "Benefits", "General_Description"
+]
 
 # Load the input data
 def load_data():
@@ -88,10 +96,6 @@ def load_data():
     initiated_october_items = filter_and_merge_items(october_items, 'Initiated', item_hierarchy)
     # print(f"Number of approved items: {len(approved_october_items)}")
     # print(f"Number of initiated items: {len(initiated_october_items)}")
-
-    # Save the approved and initiated items to files
-    approved_october_items.to_excel("approved_october_items.xlsx", index=False, engine='openpyxl')
-    initiated_october_items.to_excel("initiated_october_items.xlsx", index=False, engine='openpyxl')
 
     print("Data loaded successfully.")
     return analytical_hierarchy, item_hierarchy, approved_october_items, initiated_october_items
@@ -204,14 +208,6 @@ def clean_value(value):
 def prepare_documents_for_upload(filtered_data):
     print(f"Preparing {len(filtered_data)} documents for upload...")
     documents = []
-
-    fields = [
-        "Item_Num", "Description_1", "Description_2", "GTIN", "Brand_Id", "Brand_Name", 
-        "GDSN_Brand", "Long_Product_Name", "Pack", "Size", "Size_UOM", "Class_Id", 
-        "Class_Name", "PBH_ID", "PBH", "Analytical_Hierarchy_CD", "Analytical_Hierarchy", 
-        "Temp_Min", "Temp_Max", "Benefits", "General_Description"
-    ]
-
     # Filter the fields to be used for embedding
     embedding_fields = [
         "Item_Num", "Brand_Id", "Brand_Name", "GDSN_Brand", "Long_Product_Name", 
@@ -273,7 +269,9 @@ def create_vector_search_config():
     return VectorSearch(
         algorithms=[
             HnswAlgorithmConfiguration(
-                name="myHnsw"
+                name="myHnsw",
+                # efConstruction=200,  # Larger value improves recall but increases indexing time
+                # m=64                # Number of neighbors, higher values improve accuracy at the cost of memory
             )
         ],
         profiles=[
@@ -502,30 +500,6 @@ def run_test(data, max_retries=3, retry_backoff=5):
         while retries > 0:
             try:
                 # TODO See about leveraging L2 Reranker and QR to improve the search results: https://techcommunity.microsoft.com/blog/azure-ai-services-blog/raising-the-bar-for-rag-excellence-query-rewriting-and-new-semantic-ranker/4302729 
-
-                # TODO update the vector search to be on more fields: 
-                # 'Item_Num', 
-                # 'Description_1',
-                # 'Description_2',
-                # 'GTIN',
-                # 'Brand_Id',
-                # 'Brand_Name',
-                # 'GDSN_Brand',
-                # 'Long_Product_Name',
-                # 'Pack',
-                # 'Size',
-                # 'Size_UOM',
-                # 'Class_Id',
-                # 'Class_Name',
-                # 'PBH_ID',
-                # 'PBH',
-                # 'Analytical_Hierarchy_CD',
-                # 'Analytical_Hierarchy',
-                # 'Temp_Min',
-                # 'Temp_Max',
-                # 'Benefits',
-                # 'General_Description'
-
                 search_results = vector_search(row["Class_Name"] + " " + row["PBH"] + " " + row["Long_Product_Name"])
                 
                 # TODO make predictions for the Three fields, Class, PBH, and Analytical_Hierarchy
@@ -555,54 +529,241 @@ def save_predictions(items, filename):
     items.to_excel(filename, index=False, engine='openpyxl')
 
 
-# Evaluate the predictions using the ground truth data
-def evaluate_predictions(predictions, ground_truth_data):
-    hierarchy_correct = 0
-    total_predictions = len(predictions)
+# # Evaluate the predictions using the ground truth data
+# def evaluate_predictions(predictions, ground_truth_data):
+#     hierarchy_correct = 0
+#     total_predictions = len(predictions)
 
-    class_name_correct = 0
-    pbh_correct = 0
+#     class_name_correct = 0
+#     pbh_correct = 0
 
-    for _, row in predictions.iterrows():
-        item_num = row["Item_Num"]
+#     for _, row in predictions.iterrows():
+#         item_num = row["Item_Num"]
         
-        if row["Class_Name"] == ground_truth_data.loc[ground_truth_data["Item_Num"] == item_num, "Class_Name"].values[0]:
-            class_name_correct += 1
+#         if row["Class_Name"] == ground_truth_data.loc[ground_truth_data["Item_Num"] == item_num, "Class_Name"].values[0]:
+#             class_name_correct += 1
 
-        if row["PBH"] == ground_truth_data.loc[ground_truth_data["Item_Num"] == item_num, "PBH"].values[0]:
-            pbh_correct += 1
+#         if row["PBH"] == ground_truth_data.loc[ground_truth_data["Item_Num"] == item_num, "PBH"].values[0]:
+#             pbh_correct += 1
         
-        predicted_hierarchy = str(row["Predicted_Hierarchy_CD"])  # Convert to string
-        ground_truth_hierarchy = str(ground_truth_data.loc[ground_truth_data["Item_Num"] == item_num, "Hierarchy CD"].values[0])  # Convert to string
-        if predicted_hierarchy == ground_truth_hierarchy:
-            hierarchy_correct += 1
+#         predicted_hierarchy = str(row["Predicted_Hierarchy_CD"])  # Convert to string
+#         ground_truth_hierarchy = str(ground_truth_data.loc[ground_truth_data["Item_Num"] == item_num, "Hierarchy CD"].values[0])  # Convert to string
+#         if predicted_hierarchy == ground_truth_hierarchy:
+#             hierarchy_correct += 1
 
-    hierarchy_accuracy = hierarchy_correct / total_predictions
-    class_name_accuracy = class_name_correct / total_predictions
-    pbh_accuracy = pbh_correct / total_predictions
-    overall_accuracy = (class_name_correct + pbh_correct + hierarchy_correct) / (3 * total_predictions)
+#     hierarchy_accuracy = hierarchy_correct / total_predictions
+#     class_name_accuracy = class_name_correct / total_predictions
+#     pbh_accuracy = pbh_correct / total_predictions
+#     overall_accuracy = (class_name_correct + pbh_correct + hierarchy_correct) / (3 * total_predictions)
 
-    print(f"Class Name Accuracy: {class_name_accuracy:.2%}")
-    print(f"PBH Accuracy: {pbh_accuracy:.2%}")
-    print(f"Hierarchy Accuracy: {hierarchy_accuracy:.2%}")
-    print(f"Overall Accuracy: {overall_accuracy:.2%}")
+#     print(f"Class Name Accuracy: {class_name_accuracy:.2%}")
+#     print(f"PBH Accuracy: {pbh_accuracy:.2%}")
+#     print(f"Hierarchy Accuracy: {hierarchy_accuracy:.2%}")
+#     print(f"Overall Accuracy: {overall_accuracy:.2%}")
+
+def evaluate_predictions(predictions, ground_truth):
+    merged_data = pd.merge(predictions, ground_truth, on="Item_Num", suffixes=("_predicted", "_actual"))
+
+    class_accuracy = (merged_data["Predicted_Class_Name"] == merged_data["Class_Name_actual"]).mean()
+    pbh_accuracy = (merged_data["Predicted_PBH"] == merged_data["PBH_actual"]).mean()
+    analytical_accuracy = (merged_data["Predicted_Analytical_Hierarchy"] == merged_data["Analytical_Hierarchy_actual"]).mean()
+
+    overall_accuracy = (
+        (merged_data["Predicted_Class_Name"] == merged_data["Class_Name_actual"]) &
+        (merged_data["Predicted_PBH"] == merged_data["PBH_actual"]) &
+        (merged_data["Predicted_Analytical_Hierarchy"] == merged_data["Analytical_Hierarchy_actual"])
+    ).mean()
+
+    return {
+        "Class Accuracy": class_accuracy,
+        "PBH Accuracy": pbh_accuracy,
+        "Analytical Hierarchy Accuracy": analytical_accuracy,
+        "Overall Accuracy": overall_accuracy
+    }
+
+
+def construct_query_text(row):
+    """
+    Construct a query text based on the semantic configuration.
+    """
+    # Combine prioritized fields for the query
+    query_parts = [
+        str(row.get('Long_Product_Name', '')),  # Title field
+        str(row.get('Class_Name', '')),         # Content field
+        str(row.get('PBH', '')),                # Content field
+        str(row.get('Analytical_Hierarchy', '')), # Keywords field
+        str(row.get('Brand_Name', '')),         # Content field
+        str(row.get('GDSN_Brand', '')),         # Content field
+        str(row.get('Benefits', '')),           # Content field
+        str(row.get('General_Description', '')) # Content field
+    ]
+    # Remove empty parts and join with a space, excluding 'nan' values
+    query_text = " ".join(part for part in query_parts if part.strip() and part.lower() != 'nan')
+    return query_text
+
+
+def hybrid_search(row, search_client, top_k=5):
+    """
+    Perform a hybrid search for the given row.
+    """
+    # Construct query text
+    query_text = construct_query_text(row)
+
+    # Define vector query
+    vector_query = VectorizableTextQuery(
+        text=query_text,
+        k_nearest_neighbors=50,
+        fields="embedding"
+    )
+    
+    # Perform hybrid search
+    results = search_client.search(
+        search_text=query_text,
+        semantic_configuration_name="mySemanticConfig",
+        vector_queries=[vector_query],
+        select=["Class_Name", "PBH", "Analytical_Hierarchy"],
+        top=top_k
+    )
+
+    # # Log results for debugging
+    # for result in results:
+    #     print(f"Class_Name: {result['Class_Name']}, PBH: {result['PBH']}, Analytical_Hierarchy: {result['Analytical_Hierarchy']}, Score: {result['@search.score']}")
+    
+    return results
+
+
+class ProductClassification(BaseModel):
+    class_name: str
+    pbh: str
+    analytical_hierarchy: str
+
+
+def build_classification_prompt(row, search_results):
+    """
+    Build the GPT-4 prompt based on the product details and search results.
+    """
+    product_details = "Product Details:\n"
+    fields = [
+        "Item_Num", "Description_1", "Description_2", "GTIN", "Brand_Id", "Brand_Name", 
+        "GDSN_Brand", "Long_Product_Name", "Pack", "Size", "Size_UOM", "Class_Id", 
+        "Class_Name", "PBH_ID", "PBH", "Analytical_Hierarchy_CD", "Analytical_Hierarchy", 
+        "Temp_Min", "Temp_Max", "Benefits", "General_Description"
+    ]
+
+    for field in fields:
+        product_details += f"    - {field.replace('_', ' ').title()}: {row.get(field, '')}\n"
+        
+    prompt = f"""
+        You are a product classification expert. Your task is to evaluate the search results for the product described below and determine a classification for Class Name, PBH, and Analytical Hierarchy that best matches a product's details. Use the product's fields to guide your reasoning.
+
+        Evaluate the predictions based on the following criteria:
+        1. Relevance to the Class Name.
+        2. Alignment with the PBH (Product Book Handler).
+        3. Consistency with the Long Product Name.
+
+        For each prediction, use your reasoning to analyze how well it matches the product details. Then, based on your analysis, select the Class Name, PBH, and Analytical Hierarchy that provides the most accurate categorization.
+
+        {product_details}
+
+        Search Results:
+        """
+    
+    if not search_results:
+        print("No search results found.")
+    else:
+        for i, result in enumerate(search_results):
+            prompt += f"{i+1}. \n"
+            for field in fields:
+                prompt += f"    {field.replace('_', ' ').title()}: {result.get(field, '')}\n"
+            prompt += "\n"
+
+    prompt += """
+        Based on the product details and search results, select the best match for:
+        - Class Name
+        - PBH
+        - Analytical Hierarchy
+        
+        Provide your response as:
+        - Class Name:
+        - PBH:
+        - Analytical Hierarchy:
+    """
+    
+    return prompt
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=5, max=60))
+def choose_best_prediction(search_results, row):
+    """
+    Use GPT-4o to select the best prediction based on search results and all relevant fields in the row.
+    """
+    prompt = build_classification_prompt(row, search_results)
+
+    try:
+        response = client.beta.chat.completions.parse(
+            model=openai_model_name,
+            messages=[
+                {"role": "system", "content": "You are an expert in product categorization."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=500,
+            temperature=0,
+            response_format=ProductClassification
+        )
+
+        prediction = response.choices[0].message.parsed
+        return prediction
+
+    except openai.ContentFilterFinishReasonError as e:
+        print(f"Content filter error: {e}")
+        print(f"Problematic prompt: {prompt}")
+        return None
+
+
+def predict_classifications(initiated_data, search_client, gpt_client):
+    predictions = []
+    total_items = len(initiated_data)
+
+    for idx, (_, row) in enumerate(initiated_data.iterrows(), start=1):
+        # Perform hybrid search
+        search_results = hybrid_search(row, search_client)
+
+        # Generate the best prediction
+        prediction = choose_best_prediction(search_results, row)
+        if prediction:
+            predictions.append({
+                "Item_Num": row["Item_Num"],
+                "Predicted_Class_Name": prediction.class_name,
+                "Predicted_PBH": prediction.pbh,
+                "Predicted_Analytical_Hierarchy": prediction.analytical_hierarchy
+            })
+
+        # Log progress
+        if idx % 10 == 0 or idx == total_items:
+            print(f"Processed {idx}/{total_items} items")
+
+    return pd.DataFrame(predictions)
+
 
 def main():
     # Step 1: Load the data, get the approved and initiated items
-    analytical_hierarchy, item_hierarchy, approved_october_items, initiated_october_items = load_data()
+    # analytical_hierarchy, item_hierarchy, approved_october_items, initiated_october_items = load_data()
+    # approved_october_items.to_excel("approved_october_items.xlsx", index=False, engine='openpyxl')
+    # initiated_october_items.to_excel("initiated_october_items.xlsx", index=False, engine='openpyxl')
 
     # Step 2: Build an index of items with embeddings around the Approved items
-    approved_october_items = pd.read_excel("approved_october_items.xlsx", engine="openpyxl")
-    create_embedding_index(approved_october_items, search_client)
+    # approved_october_items = pd.read_excel("approved_october_items.xlsx", engine="openpyxl")
+    # create_embedding_index(approved_october_items, search_client)
 
-    # # Step 3: Query the model for each Initiated item, predict the Class, PBH, Analytical_Hierarchy, and save the results
-    # # TODO test with up to ~2220 items and get accuracies for Class, PBH, and Analytical_Hierarchy
-    # results = run_test(initiated_october_items.head(200))
-    # save_predictions(results, "predicted_october_items.xlsx") # Save the predictions
+    # Step 3: Predict the Class, PBH, Analytical_Hierarchy, and save the results
+    initiated_october_items = pd.read_excel("initiated_october_items.xlsx", engine="openpyxl")
+    predictions = predict_classifications(initiated_october_items, search_client, client)
+    predictions.to_excel("predicted_results.xlsx", index=False, engine="openpyxl")
 
-    # # Step 4: Evaluate the predictions
-    # predicted_items = pd.read_excel("predicted_october_items.xlsx", engine="openpyxl") # Load the saved predictions
-    # evaluate_predictions(predicted_items, approved_october_items) # Evaluate the predictions
+    # Step 4: Evaluate the predictions
+    # approved_data = pd.read_excel("approved_october_items.xlsx", engine="openpyxl")
+    # accuracy = evaluate_predictions(predictions, approved_data)
+    # print("Accuracy Summary:", accuracy)
 
 if __name__ == "__main__":
     # Apply this function to extract matching rows for each item

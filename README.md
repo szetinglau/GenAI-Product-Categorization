@@ -1,5 +1,7 @@
 # pfg-product-categorization
 
+TODO Turn off content filter for this. It triggers maybe once every 100 product items when classifying through gpt-4o
+
 TODO Update Readme as this might be a highly repeatable solution
 
 
