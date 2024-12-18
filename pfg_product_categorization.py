@@ -376,157 +376,157 @@ def create_embedding_index(filtered_data, search_client):
     upload_documents_to_search(documents, search_client)
 
 
-# Perform vector search
-def vector_search(query):
-    embedding = generate_embedding(query)
+# # Perform vector search
+# def vector_search(query):
+#     embedding = generate_embedding(query)
 
-    # 50 is an optimal value for k_nearest_neighbors when performing vector search
-    # To learn more about how vector ranking works, please visit https://learn.microsoft.com/azure/search/vector-search-ranking
-    vector_query = VectorizableTextQuery(text=query, k_nearest_neighbors=50, fields="embedding")
+#     # 50 is an optimal value for k_nearest_neighbors when performing vector search
+#     # To learn more about how vector ranking works, please visit https://learn.microsoft.com/azure/search/vector-search-ranking
+#     vector_query = VectorizableTextQuery(text=query, k_nearest_neighbors=50, fields="embedding")
     
-    results = search_client.search(  
-        search_text=query,  
-        vector_queries= [vector_query],
-        select=["hierarchy_path", "hierarchy_cd"],
-        top=3
-    )  
-    # for result in results:
-        # print(result["hierarchy_path"], result["hierarchy_cd"], result["@search.score"])
+#     results = search_client.search(  
+#         search_text=query,  
+#         vector_queries= [vector_query],
+#         select=["hierarchy_path", "hierarchy_cd"],
+#         top=3
+#     )  
+#     # for result in results:
+#         # print(result["hierarchy_path"], result["hierarchy_cd"], result["@search.score"])
 
-    return results
+#     return results
 
-# vector_search("DAIRY PROD & SUBS CHEESE CHEESE FRENCH") # = 1687 is False
-# vector_search("PRODUCE PRE-CUT VEGETABLEs PRE-CUT VEGETABLE BLEND ROASTING CAULIFLOWER BUTTERNUT RED PEARL ONION BRUSSEL SPROUT") # should be 2539
-# vector_search("CHEMICALS & CLEANING FOOD SAFETY & KITCHEN CLN GREASE CARTRIDGE FOOD GRADE") # should be 1121
-# 1011979       	2024-10-25 10:22:03.8120000	Approved	elafler4210	DISPLAY COUNTER UNIT COUGH DROP	NULL	00036602834224	3012          	RICOLA	NULL	DISPLAY COUNTER UNIT COUGH DROP	30	45   	GM	14            	MISCELLANEOUS	9999	MISCELLANEOUS USE	954           	42.00	80.00	NULL	NULL
-# should be DISPOSABLES>>HEALTHCARE>>MISCELLANEOUS
+# # vector_search("DAIRY PROD & SUBS CHEESE CHEESE FRENCH") # = 1687 is False
+# # vector_search("PRODUCE PRE-CUT VEGETABLEs PRE-CUT VEGETABLE BLEND ROASTING CAULIFLOWER BUTTERNUT RED PEARL ONION BRUSSEL SPROUT") # should be 2539
+# # vector_search("CHEMICALS & CLEANING FOOD SAFETY & KITCHEN CLN GREASE CARTRIDGE FOOD GRADE") # should be 1121
+# # 1011979       	2024-10-25 10:22:03.8120000	Approved	elafler4210	DISPLAY COUNTER UNIT COUGH DROP	NULL	00036602834224	3012          	RICOLA	NULL	DISPLAY COUNTER UNIT COUGH DROP	30	45   	GM	14            	MISCELLANEOUS	9999	MISCELLANEOUS USE	954           	42.00	80.00	NULL	NULL
+# # should be DISPOSABLES>>HEALTHCARE>>MISCELLANEOUS
 
-# Define the function to choose the best hierarchy path
-def choose_best_hierarchy_path(long_product_name, pbh, class_name, predictions):
-    """
-    Uses GPT-4 to reason and choose the best hierarchy path from the top predictions.
+# # Define the function to choose the best hierarchy path
+# def choose_best_hierarchy_path(long_product_name, pbh, class_name, predictions):
+#     """
+#     Uses GPT-4 to reason and choose the best hierarchy path from the top predictions.
     
-    Args:
-        long_product_name (str): The long product name.
-        pbh (str): The PBH (Product Business Hierarchy) value.
-        class_name (str): The product class name.
-        predictions (list[dict]): A list of dictionaries containing 'hierarchy_cd' and 'hierarchy_path'.
+#     Args:
+#         long_product_name (str): The long product name.
+#         pbh (str): The PBH (Product Business Hierarchy) value.
+#         class_name (str): The product class name.
+#         predictions (list[dict]): A list of dictionaries containing 'hierarchy_cd' and 'hierarchy_path'.
     
-    Returns:
-        str: The best matching hierarchy_cd chosen by GPT-4.
-    """
-    # Construct the GPT-4 prompt
-    # TODO Correct and improve the few shot examples in the prompt
-    prompt = f"""
-    You are an expert in product categorization and hierarchy matching. Your task is to evaluate which of the given hierarchy paths best matches a product's details. Use the product's Long Product Name, PBH, and Class Name to guide your reasoning.
+#     Returns:
+#         str: The best matching hierarchy_cd chosen by GPT-4.
+#     """
+#     # Construct the GPT-4 prompt
+#     # TODO Correct and improve the few shot examples in the prompt
+#     prompt = f"""
+#     You are an expert in product categorization and hierarchy matching. Your task is to evaluate which of the given hierarchy paths best matches a product's details. Use the product's Long Product Name, PBH, and Class Name to guide your reasoning.
 
-    Each prediction is associated with a Hierarchy CD and its full path. Evaluate the predictions based on the following criteria:
-        1. Relevance to the Class Name.
-        2. Alignment with the PBH (Product Business Hierarchy).
-        3. Consistency with the Long Product Name.
+#     Each prediction is associated with a Hierarchy CD and its full path. Evaluate the predictions based on the following criteria:
+#         1. Relevance to the Class Name.
+#         2. Alignment with the PBH (Product Business Hierarchy).
+#         3. Consistency with the Long Product Name.
 
-    For each prediction, use your reasoning to analyze how well it matches the product details. Then, based on your analysis, select the Hierarchy CD that provides the most accurate categorization.
+#     For each prediction, use your reasoning to analyze how well it matches the product details. Then, based on your analysis, select the Hierarchy CD that provides the most accurate categorization.
 
-    **Few-Shot Examples:**
+#     **Few-Shot Examples:**
 
-    **Example 1:**
-    - Class Name: "DISPOSABLES"
-    - PBH: "CARTONS/CONTAINERS/TRAYS"
-    - Long Product Name: "BOX PIZZA 16" WHITE_KRAFT"
-    - Search Results:
-        1. Hierarchy CD: "2024", Path: "DISPOSABLES>>CONTAINERS/TO GO>>PAPER>>FOOD TRAY"
-        2. Hierarchy CD: "298", Path: "DISPOSABLES>>BOX & ACCESSORIES>>PIZZA>>PIZZA BOX"
-        3. Hierarchy CD: "298", Path: "DISPOSABLES>>BOX & ACCESSORIES>>PIZZA>>PIZZA BOX"
+#     **Example 1:**
+#     - Class Name: "DISPOSABLES"
+#     - PBH: "CARTONS/CONTAINERS/TRAYS"
+#     - Long Product Name: "BOX PIZZA 16" WHITE_KRAFT"
+#     - Search Results:
+#         1. Hierarchy CD: "2024", Path: "DISPOSABLES>>CONTAINERS/TO GO>>PAPER>>FOOD TRAY"
+#         2. Hierarchy CD: "298", Path: "DISPOSABLES>>BOX & ACCESSORIES>>PIZZA>>PIZZA BOX"
+#         3. Hierarchy CD: "298", Path: "DISPOSABLES>>BOX & ACCESSORIES>>PIZZA>>PIZZA BOX"
 
-    **Best Hierarchy CD:** 298
+#     **Best Hierarchy CD:** 298
 
-    ---
+#     ---
 
-    **Example 2:**
-    - Class Name: "FROZEN FOOD PROCESS"
-    - PBH: "APPETIZERS/HORS D OEUVRES"
-    - Long Product Name: "EGG ROLL PIZZA PEPPERONI"
-    - Search Results:
-        1. Hierarchy CD: "1013", Path: "BAKERY, FROZEN>>PRETZELS>>THAW & SERVE"
-        2. Hierarchy CD: "1013", Path: "BAKERY, FROZEN>>PRETZELS>>THAW & SERVE"
-        3. Hierarchy CD: "2341", Path: "BAKERY, FROZEN>>PIZZA CRUSTS>>DOUGH BALL"
+#     **Example 2:**
+#     - Class Name: "FROZEN FOOD PROCESS"
+#     - PBH: "APPETIZERS/HORS D OEUVRES"
+#     - Long Product Name: "EGG ROLL PIZZA PEPPERONI"
+#     - Search Results:
+#         1. Hierarchy CD: "1013", Path: "BAKERY, FROZEN>>PRETZELS>>THAW & SERVE"
+#         2. Hierarchy CD: "1013", Path: "BAKERY, FROZEN>>PRETZELS>>THAW & SERVE"
+#         3. Hierarchy CD: "2341", Path: "BAKERY, FROZEN>>PIZZA CRUSTS>>DOUGH BALL"
 
-    **Best Hierarchy CD:** 1139
+#     **Best Hierarchy CD:** 1139
 
-    **Example 3:**
-    - Class Name: "DAIRY PROD & SUBS"
-    - PBH: "MILKS/CREAMS/YOGURT"
-    - Long Product Name: "EGGNOG ULTRA-HIGH-TEMPERATURE 32OZ PAPER CARTON"
-    - Search Results:
-        1. Hierarchy CD: "1420", Path: "CHEESE & DAIRY>>MILK & CREAMERS>>SOY & OTHER MILKS"
-        2. Hierarchy CD: "2652", Path: "CHEESE & DAIRY>>MILK & CREAMERS>>FLUID MILK>>EGG NOG"
-        3. Hierarchy CD: "2652", Path: "CHEESE & DAIRY>>MILK & CREAMERS>>FLUID MILK>>EGG NOG"
+#     **Example 3:**
+#     - Class Name: "DAIRY PROD & SUBS"
+#     - PBH: "MILKS/CREAMS/YOGURT"
+#     - Long Product Name: "EGGNOG ULTRA-HIGH-TEMPERATURE 32OZ PAPER CARTON"
+#     - Search Results:
+#         1. Hierarchy CD: "1420", Path: "CHEESE & DAIRY>>MILK & CREAMERS>>SOY & OTHER MILKS"
+#         2. Hierarchy CD: "2652", Path: "CHEESE & DAIRY>>MILK & CREAMERS>>FLUID MILK>>EGG NOG"
+#         3. Hierarchy CD: "2652", Path: "CHEESE & DAIRY>>MILK & CREAMERS>>FLUID MILK>>EGG NOG"
 
-    **Best Hierarchy CD:** 2652
+#     **Best Hierarchy CD:** 2652
 
 
-    **Output Requirements:**
-    - Provide only the best Hierarchy CD as a single number. Do not include any additional text or reasoning in your response.
+#     **Output Requirements:**
+#     - Provide only the best Hierarchy CD as a single number. Do not include any additional text or reasoning in your response.
 
-    **Input Details:**
-"""
+#     **Input Details:**
+# """
 
-    # Add the predictions to the prompt
-    for i, prediction in enumerate(predictions):
-        prompt += f"{i+1}. Hierarchy CD: {prediction['hierarchy_cd']}, Path: {prediction['hierarchy_path']}\n"
+#     # Add the predictions to the prompt
+#     for i, prediction in enumerate(predictions):
+#         prompt += f"{i+1}. Hierarchy CD: {prediction['hierarchy_cd']}, Path: {prediction['hierarchy_path']}\n"
 
-    # Call GPT-4o
-    response = client.chat.completions.create(
-        model=openai_model_name,
-        messages=[
-            {"role": "system", "content": "You are an expert in product categorization."},
-            {"role": "user", "content": prompt}
-        ],
-        max_tokens=5000,  # Limit tokens to focus on reasoning and decision
-        temperature=0  # Set to 0 for deterministic output
-    )
+#     # Call GPT-4o
+#     response = client.chat.completions.create(
+#         model=openai_model_name,
+#         messages=[
+#             {"role": "system", "content": "You are an expert in product categorization."},
+#             {"role": "user", "content": prompt}
+#         ],
+#         max_tokens=5000,  # Limit tokens to focus on reasoning and decision
+#         temperature=0  # Set to 0 for deterministic output
+#     )
 
-    # Extract the chosen Hierarchy CD from GPT-4's response
-    chosen_hierarchy_cd = response.choices[0].message.content
-    return chosen_hierarchy_cd
+#     # Extract the chosen Hierarchy CD from GPT-4's response
+#     chosen_hierarchy_cd = response.choices[0].message.content
+#     return chosen_hierarchy_cd
 
-def run_test(data, max_retries=3, retry_backoff=5):
-    predicted_hierarchies = []
+# def run_test(data, max_retries=3, retry_backoff=5):
+#     predicted_hierarchies = []
 
-    for idx, row in data.iterrows(): 
-        retries = max_retries
-        prediction = None
+#     for idx, row in data.iterrows(): 
+#         retries = max_retries
+#         prediction = None
 
-        while retries > 0:
-            try:
-                # TODO See about leveraging L2 Reranker and QR to improve the search results: https://techcommunity.microsoft.com/blog/azure-ai-services-blog/raising-the-bar-for-rag-excellence-query-rewriting-and-new-semantic-ranker/4302729 
-                search_results = vector_search(row["Class_Name"] + " " + row["PBH"] + " " + row["Long_Product_Name"])
+#         while retries > 0:
+#             try:
+#                 # TODO See about leveraging L2 Reranker and QR to improve the search results: https://techcommunity.microsoft.com/blog/azure-ai-services-blog/raising-the-bar-for-rag-excellence-query-rewriting-and-new-semantic-ranker/4302729 
+#                 search_results = vector_search(row["Class_Name"] + " " + row["PBH"] + " " + row["Long_Product_Name"])
                 
-                # TODO make predictions for the Three fields, Class, PBH, and Analytical_Hierarchy
-                prediction = choose_best_hierarchy_path(row["Long_Product_Name"], row["PBH"], row["Class_Name"], search_results)
-                break
-            except Exception as e:
-                print(f"Error occurred for item {row['Item_Num']}: {e}")
-                retries -= 1
-                if retries > 0:
-                    print(f"Retrying... {max_retries - retries + 1}/{max_retries}")
-                    time.sleep(retry_backoff ** (max_retries - retries))  # Exponential backoff
-                else:
-                    print(f"Max retries reached for row {idx}. Skipping...")
+#                 # TODO make predictions for the Three fields, Class, PBH, and Analytical_Hierarchy
+#                 prediction = choose_best_hierarchy_path(row["Long_Product_Name"], row["PBH"], row["Class_Name"], search_results)
+#                 break
+#             except Exception as e:
+#                 print(f"Error occurred for item {row['Item_Num']}: {e}")
+#                 retries -= 1
+#                 if retries > 0:
+#                     print(f"Retrying... {max_retries - retries + 1}/{max_retries}")
+#                     time.sleep(retry_backoff ** (max_retries - retries))  # Exponential backoff
+#                 else:
+#                     print(f"Max retries reached for row {idx}. Skipping...")
 
-        predicted_hierarchies.append(prediction)   
+#         predicted_hierarchies.append(prediction)   
         
-        if idx == 200:
-            break
-    # Add the predicted values as a new column to the DataFrame
-    data = data.assign(Predicted_Hierarchy_CD=predicted_hierarchies)
+#         if idx == 200:
+#             break
+#     # Add the predicted values as a new column to the DataFrame
+#     data = data.assign(Predicted_Hierarchy_CD=predicted_hierarchies)
     
-    return data
+#     return data
 
 
-# Save predictions
-def save_predictions(items, filename):
-    items.to_excel(filename, index=False, engine='openpyxl')
+# # Save predictions
+# def save_predictions(items, filename):
+#     items.to_excel(filename, index=False, engine='openpyxl')
 
 
 # # Evaluate the predictions using the ground truth data
@@ -561,24 +561,105 @@ def save_predictions(items, filename):
 #     print(f"Hierarchy Accuracy: {hierarchy_accuracy:.2%}")
 #     print(f"Overall Accuracy: {overall_accuracy:.2%}")
 
-def evaluate_predictions(predictions, ground_truth):
-    merged_data = pd.merge(predictions, ground_truth, on="Item_Num", suffixes=("_predicted", "_actual"))
 
-    class_accuracy = (merged_data["Predicted_Class_Name"] == merged_data["Class_Name_actual"]).mean()
-    pbh_accuracy = (merged_data["Predicted_PBH"] == merged_data["PBH_actual"]).mean()
-    analytical_accuracy = (merged_data["Predicted_Analytical_Hierarchy"] == merged_data["Analytical_Hierarchy_actual"]).mean()
+def evaluate_predictions(initiated_items, predicted_items, approved_items):
+    """
+    Evaluate predictions against ground truth, comparing initial, predicted, and actual states.
+    Save evaluation metrics and detailed comparison to an Excel file with multiple tabs.
+    Tab 1: Initiated Items (raw values).
+    Tab 2: Approved Items (ground truth).
+    Tab 3: Predicted Items (with Analytical Hierarchy mapped).
+    Tab 4: Detailed Comparison of initial, predicted, and actual values.
+    Tab 5: Mismatch Summary.
+    Tab 6: Accuracy Summary.
+    """
+    # Create a mapping of Analytical_Hierarchy to Analytical_Hierarchy_CD from approved items
+    hierarchy_mapping = approved_items.set_index("Analytical_Hierarchy")[
+        "Analytical_Hierarchy_CD"].to_dict()
 
+    # Map Analytical_Hierarchy_CD to Analytical_Hierarchy for predicted items
+    predictions = predicted_items.copy()
+    predictions["Analytical_Hierarchy_CD"] = predictions["Analytical_Hierarchy"].map(hierarchy_mapping)
+
+    # Prepare the detailed comparison table
+    detailed_comparison = initiated_items[[
+        "Item_Num", "Brand_Name", "Long_Product_Name"
+    ]].copy()
+    # Add initial, predicted, and actual values side by side for comparison
+    detailed_comparison["Class_Name_initial"] = initiated_items["Class_Name"].str.strip()
+    detailed_comparison["Class_Name_predicted"] = predictions["Class_Name"].str.strip()
+    detailed_comparison["Class_Name_actual"] = approved_items["Class_Name"].str.strip()
+
+    detailed_comparison["PBH_initial"] = initiated_items["PBH"].str.strip()
+    detailed_comparison["PBH_predicted"] = predictions["PBH"].str.strip()
+    detailed_comparison["PBH_actual"] = approved_items["PBH"].str.strip()
+
+    detailed_comparison["Analytical_Hierarchy_CD_initial"] = initiated_items["Analytical_Hierarchy_CD"].str.strip()
+    detailed_comparison["Analytical_Hierarchy_CD_predicted"] = predictions["Analytical_Hierarchy_CD"].str.strip()
+    detailed_comparison["Analytical_Hierarchy_CD_actual"] = approved_items["Analytical_Hierarchy_CD"].str.strip()
+
+    detailed_comparison["Analytical_Hierarchy_initial"] = initiated_items["Analytical_Hierarchy"].str.strip()
+    detailed_comparison["Analytical_Hierarchy_predicted"] = predictions["Analytical_Hierarchy"].str.strip()
+    detailed_comparison["Analytical_Hierarchy_actual"] = approved_items["Analytical_Hierarchy"].str.strip()
+
+    # Identify mismatches
+    detailed_comparison["Class_Name_Match"] = detailed_comparison["Class_Name_predicted"] == detailed_comparison["Class_Name_actual"]
+    detailed_comparison["PBH_Match"] = detailed_comparison["PBH_predicted"] == detailed_comparison["PBH_actual"]
+    detailed_comparison["Analytical_Hierarchy_Match"] = detailed_comparison["Analytical_Hierarchy_predicted"] == detailed_comparison["Analytical_Hierarchy_actual"]
+
+    # Create a mismatch summary
+    mismatch_summary = detailed_comparison[
+        ~detailed_comparison[["Class_Name_Match", "PBH_Match", "Analytical_Hierarchy_Match"]].all(axis=1)
+    ].copy()
+
+    # Drop the match indicators from mismatch summary
+    mismatch_summary = mismatch_summary.drop(columns=["Class_Name_Match", "PBH_Match", "Analytical_Hierarchy_Match"])
+
+    # Calculate accuracies for each field
+    class_accuracy = (detailed_comparison["Class_Name_predicted"] == detailed_comparison["Class_Name_actual"]).mean()
+    pbh_accuracy = (detailed_comparison["PBH_predicted"] == detailed_comparison["PBH_actual"]).mean()
+    analytical_accuracy = (detailed_comparison["Analytical_Hierarchy_predicted"] == detailed_comparison["Analytical_Hierarchy_actual"]).mean()
+
+    # Calculate overall accuracy (all fields must match)
     overall_accuracy = (
-        (merged_data["Predicted_Class_Name"] == merged_data["Class_Name_actual"]) &
-        (merged_data["Predicted_PBH"] == merged_data["PBH_actual"]) &
-        (merged_data["Predicted_Analytical_Hierarchy"] == merged_data["Analytical_Hierarchy_actual"])
+        (detailed_comparison["Class_Name_predicted"] == detailed_comparison["Class_Name_actual"]) &
+        (detailed_comparison["PBH_predicted"] == detailed_comparison["PBH_actual"]) &
+        (detailed_comparison["Analytical_Hierarchy_predicted"] == detailed_comparison["Analytical_Hierarchy_actual"])
     ).mean()
+
+    # Create a DataFrame for the accuracy summary
+    accuracy_summary = pd.DataFrame({
+        "Metric": ["Class Accuracy", "PBH Accuracy", "Analytical Hierarchy Accuracy", "Overall Accuracy"],
+        "Value": [class_accuracy, pbh_accuracy, analytical_accuracy, overall_accuracy]
+    })
+
+    # Save all results to a single Excel file with multiple tabs
+    with pd.ExcelWriter("evaluation_results.xlsx", engine="openpyxl") as writer:
+        # Tab 1: Initiated Items
+        initiated_items.to_excel(writer, sheet_name="Initiated Items", index=False)
+
+        # Tab 2: Approved Items
+        approved_items.to_excel(writer, sheet_name="Approved Items", index=False)
+
+        # Tab 3: Predicted Items
+        predictions.to_excel(writer, sheet_name="Predicted Items", index=False)
+
+        # Tab 4: Detailed Comparison
+        detailed_comparison.to_excel(writer, sheet_name="Detailed Comparison", index=False)
+
+        # Tab 5: Mismatch Summary
+        mismatch_summary.to_excel(writer, sheet_name="Mismatch Summary", index=False)
+
+        # Tab 6: Accuracy Summary
+        accuracy_summary.to_excel(writer, sheet_name="Accuracy Summary", index=False)
 
     return {
         "Class Accuracy": class_accuracy,
         "PBH Accuracy": pbh_accuracy,
         "Analytical Hierarchy Accuracy": analytical_accuracy,
-        "Overall Accuracy": overall_accuracy
+        "Overall Accuracy": overall_accuracy,
+        "Detailed Comparison": detailed_comparison,
+        "Mismatch Summary": mismatch_summary
     }
 
 
@@ -643,12 +724,6 @@ def build_classification_prompt(row, search_results):
     Build the GPT-4 prompt based on the product details and search results.
     """
     product_details = "Product Details:\n"
-    fields = [
-        "Item_Num", "Description_1", "Description_2", "GTIN", "Brand_Id", "Brand_Name", 
-        "GDSN_Brand", "Long_Product_Name", "Pack", "Size", "Size_UOM", "Class_Id", 
-        "Class_Name", "PBH_ID", "PBH", "Analytical_Hierarchy_CD", "Analytical_Hierarchy", 
-        "Temp_Min", "Temp_Max", "Benefits", "General_Description"
-    ]
 
     for field in fields:
         product_details += f"    - {field.replace('_', ' ').title()}: {row.get(field, '')}\n"
@@ -733,9 +808,9 @@ def predict_classifications(initiated_data, search_client, gpt_client):
         if prediction:
             predictions.append({
                 "Item_Num": row["Item_Num"],
-                "Predicted_Class_Name": prediction.class_name,
-                "Predicted_PBH": prediction.pbh,
-                "Predicted_Analytical_Hierarchy": prediction.analytical_hierarchy
+                "Class_Name": prediction.class_name,
+                "PBH": prediction.pbh,
+                "Analytical_Hierarchy": prediction.analytical_hierarchy
             })
 
         # Log progress
@@ -752,18 +827,18 @@ def main():
     # initiated_october_items.to_excel("initiated_october_items.xlsx", index=False, engine='openpyxl')
 
     # Step 2: Build an index of items with embeddings around the Approved items
-    # approved_october_items = pd.read_excel("approved_october_items.xlsx", engine="openpyxl")
+    approved_october_items = pd.read_excel("approved_october_items.xlsx", engine="openpyxl")
     # create_embedding_index(approved_october_items, search_client)
 
     # Step 3: Predict the Class, PBH, Analytical_Hierarchy, and save the results
     initiated_october_items = pd.read_excel("initiated_october_items.xlsx", engine="openpyxl")
-    predictions = predict_classifications(initiated_october_items, search_client, client)
-    predictions.to_excel("predicted_results.xlsx", index=False, engine="openpyxl")
+    # predictions = predict_classifications(initiated_october_items, search_client, client)
+    # predictions.to_excel("predicted_results.xlsx", index=False, engine="openpyxl")
 
     # Step 4: Evaluate the predictions
-    # approved_data = pd.read_excel("approved_october_items.xlsx", engine="openpyxl")
-    # accuracy = evaluate_predictions(predictions, approved_data)
-    # print("Accuracy Summary:", accuracy)
+    predictions = pd.read_excel("predicted_results.xlsx", engine="openpyxl")
+    accuracy = evaluate_predictions(initiated_october_items, predictions, approved_october_items)
+    print("Accuracy Summary:", accuracy)
 
 if __name__ == "__main__":
     # Apply this function to extract matching rows for each item
