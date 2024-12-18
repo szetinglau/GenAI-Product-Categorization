@@ -1,29 +1,33 @@
-from azure.core.exceptions import HttpResponseError
 
 import pandas as pd
+import numpy as np
 import requests, json, os
-from openai import AzureOpenAI
+import time
+
+from azure.core.exceptions import HttpResponseError
 from azure.search.documents import SearchClient
 from azure.search.documents.models import VectorizedQuery, VectorizableTextQuery
 from azure.search.documents.indexes import SearchIndexClient
 from azure.search.documents.indexes.models import (
-    SemanticConfiguration,
-    PrioritizedFields,
-    SemanticField,
-    SearchField,
+    SearchIndex,
     SimpleField,
+    SearchField,
     SearchFieldDataType,
     VectorSearch,
     HnswAlgorithmConfiguration,
     VectorSearchProfile,
-    SearchIndex,
     AzureOpenAIVectorizer,
-    AzureOpenAIVectorizerParameters
+    AzureOpenAIVectorizerParameters,
+    SemanticConfiguration,
+    SemanticPrioritizedFields,
+    SemanticField,
+    SemanticSearch
 )
 from azure.core.credentials import AzureKeyCredential
 from azure.core.pipeline.policies import RetryPolicy
 from dotenv import load_dotenv
-import time
+from openai import AzureOpenAI
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 load_dotenv(override=True)
 batch_size = 15  # Adjust batch size based on your dataset
@@ -61,17 +65,35 @@ def load_data():
     october_list_file = "October Items.xlsx"
 
     # Load data into pandas DataFrames
-    #class_pbh_detail = pd.read_excel(analytical_hierarchy_file, sheet_name=3, engine="openpyxl", skiprows=1)
     analytical_hierarchy = pd.read_excel(analytical_hierarchy_file, sheet_name=0, engine="openpyxl")
     item_hierarchy = pd.read_excel(item_hierarchy_file, engine="openpyxl")
     october_items = pd.read_excel(october_list_file, engine="openpyxl")
+
+    # print(f"Total number of items in October list: {len(october_items)}")
+
+    # # Output all initiated items
+    # initiated_items = october_items[october_items['Status'] == 'Initiated']
+    # print("Initiated Items:")
+    # print(initiated_items)
+
+    # # Output all approved items
+    # approved_items = october_items[october_items['Status'] == 'Approved']
+    # print("Approved Items:")
+    # print(approved_items)
     
     october_items["Analytical_Hierarchy"] = october_items["Analytical_Hierarchy"].str.strip() # Remove leading/trailing whitespaces
     item_hierarchy["Hierarchy CD"] = item_hierarchy["Hierarchy CD"].astype(str).str.strip() # Remove leading/trailing whitespaces
 
     approved_october_items = filter_and_merge_items(october_items, 'Approved', item_hierarchy)
     initiated_october_items = filter_and_merge_items(october_items, 'Initiated', item_hierarchy)
+    # print(f"Number of approved items: {len(approved_october_items)}")
+    # print(f"Number of initiated items: {len(initiated_october_items)}")
 
+    # Save the approved and initiated items to files
+    approved_october_items.to_excel("approved_october_items.xlsx", index=False, engine='openpyxl')
+    initiated_october_items.to_excel("initiated_october_items.xlsx", index=False, engine='openpyxl')
+
+    print("Data loaded successfully.")
     return analytical_hierarchy, item_hierarchy, approved_october_items, initiated_october_items
 
 
@@ -94,7 +116,6 @@ def filter_and_merge_items(items, status, item_hierarchy):
         'Class_Name',
         'PBH_ID',
         'PBH',
-        'Analytical_Hierarchy_cd',
         'Analytical_Hierarchy',
         'Temp_Min',
         'Temp_Max',
@@ -102,81 +123,154 @@ def filter_and_merge_items(items, status, item_hierarchy):
         'General_Description'
     ]]
 
+    # print(f"Number of {status} items before merge: {len(filtered_items)}")
 
     merged_data = pd.merge(
         filtered_items,
         item_hierarchy,
         left_on="Analytical_Hierarchy",
         right_on="Hierarchy CD",
-        how="inner"
+        how="left"
     )
+
+    # print(f"Number of {status} items after merge: {len(merged_data)}")
+
+    # Rename columns
+    merged_data.rename(columns={
+        'Analytical_Hierarchy': 'Analytical_Hierarchy_CD',
+        'Hierarchy Detail': 'Analytical_Hierarchy'
+    }, inplace=True)
+
+    # Reorder columns
+    merged_data = merged_data[[
+        'Item_Num', 
+        'Description_1',
+        'Description_2',
+        'GTIN',
+        'Brand_Id',
+        'Brand_Name',
+        'GDSN_Brand',
+        'Long_Product_Name',
+        'Pack',
+        'Size',
+        'Size_UOM',
+        'Class_Id',
+        'Class_Name',
+        'PBH_ID',
+        'PBH',
+        'Analytical_Hierarchy_CD',
+        'Analytical_Hierarchy',
+        'Temp_Min',
+        'Temp_Max',
+        'Benefits',
+        'General_Description'
+    ]]
+
     return merged_data
 
 
 # Generate embeddings for each item
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=5, max=60))
 def generate_embedding(text):
     """
-    Generate embeddings using Azure OpenAI
+    Generate embeddings using Azure OpenAI with retry logic
     """
-    try:
-        response = client.embeddings.create(input=[text], model=text_embedding_model_name)
-        return response.data[0].embedding
-    except Exception as e:
-        print(f"Embedding generation failed: {e}")
-        return None
+    response = client.embeddings.create(input=[text], model=text_embedding_model_name)
+    return response.data[0].embedding
 
 
-# Create an index in Azure Cognitive Search
-def create_embedding_index(filtered_data, search_client):
-    # Prepare documents for upload
+def save_documents_to_json(documents, filename):
+    with open(filename, 'w') as f:
+        json.dump(documents, f)
+    print(f"Documents saved to {filename}")
+
+
+def load_documents_from_json(filename):
+    with open(filename, 'r') as f:
+        documents = json.load(f)
+    print(f"Documents loaded from {filename}")
+    return documents
+
+
+def clean_value(value):
+    if pd.isna(value) or value is np.nan:
+        return ""
+    if isinstance(value, str):
+        # Replace single quotes with double quotes and strip trailing whitespace
+        return value.strip().replace("'", '"')
+    return str(value)
+
+
+def prepare_documents_for_upload(filtered_data):
+    print(f"Preparing {len(filtered_data)} documents for upload...")
     documents = []
-    for _, row in filtered_data.iterrows():
-        fields = [
-            "Item_Num", "Description_1", "Description_2", "GTIN", "Brand_Id", "Brand_Name", 
-            "GDSN_Brand", "Long_Product_Name", "Pack", "Size", "Size_UOM", "Class_Id", 
-            "Class_Name", "PBH_ID", "PBH", "Analytical_Hierarchy_cd", "Analytical_Hierarchy", 
-            "Temp_Min", "Temp_Max", "Benefits", "General_Description"
-        ]
 
-        # Filter the fields to be used for embedding
-        embedding_fields = [
-            "Item_Num", "Brand_Id", "Brand_Name", "GDSN_Brand", "Long_Product_Name", 
-            "Class_Id", "Class_Name", "PBH_ID", "PBH", "Analytical_Hierarchy_cd", 
-            "Analytical_Hierarchy", "Temp_Min", "Temp_Max", "Benefits", "General_Description"
-        ]
+    fields = [
+        "Item_Num", "Description_1", "Description_2", "GTIN", "Brand_Id", "Brand_Name", 
+        "GDSN_Brand", "Long_Product_Name", "Pack", "Size", "Size_UOM", "Class_Id", 
+        "Class_Name", "PBH_ID", "PBH", "Analytical_Hierarchy_CD", "Analytical_Hierarchy", 
+        "Temp_Min", "Temp_Max", "Benefits", "General_Description"
+    ]
+
+    # Filter the fields to be used for embedding
+    embedding_fields = [
+        "Item_Num", "Brand_Id", "Brand_Name", "GDSN_Brand", "Long_Product_Name", 
+        "Class_Id", "Class_Name", "PBH_ID", "PBH", "Analytical_Hierarchy_CD", 
+        "Analytical_Hierarchy", "Temp_Min", "Temp_Max", "Benefits", "General_Description"
+    ]
+
+    for idx, row in filtered_data.iterrows():
+        # if idx >= 100:
+        #     break
+
+        text_to_embed = " ".join(clean_value(row[field]) for field in embedding_fields)
+
+        document = {"id": clean_value(row["Item_Num"])}
+        document.update({field: clean_value(row[field]) for field in fields})
+        document["embedding"] = generate_embedding(text_to_embed)
         
-        text_to_embed = " ".join(str(row[field]) for field in embedding_fields)
-        hierarchy_embedding = generate_embedding(text_to_embed)
-        document = {
-            "id": str(row["Item_Num"])
-        }
-        for field in fields:
-            document[field] = row[field]
-        
-        document["embedding"] = hierarchy_embedding # Add the embedding field to the document
         documents.append(document)
+        
+        if idx % 100 == 0:
+            print(f"Processed {idx} documents")
+            
+    print(f"Finished preparing {len(documents)} documents for upload.")
+    
+    # Save documents to JSON
+    save_documents_to_json(documents, 'prepared_documents.json')
+    
+    return documents
 
-    # Define the semantic configuration
-    semantic_config = SemanticConfiguration(
-        name="mySemanticConfig",
-        prioritized_fields=PrioritizedFields(
-            title_field=None,
-            prioritized_content_fields=[
-                SemanticField(field_name="Brand_Name"),
-                SemanticField(field_name="GDSN_Brand"),
-                SemanticField(field_name="Long_Product_Name"),
-                SemanticField(field_name="Class_Name"),
-                SemanticField(field_name="PBH"),
-                SemanticField(field_name="Analytical_Hierarchy"),
-                SemanticField(field_name="Benefits"),
-                SemanticField(field_name="General_Description")
-            ],
-            prioritized_keywords_fields=None
-        )
-    )
 
-    # Configure the vector search configuration  
-    vector_search = VectorSearch(
+def create_semantic_search_config():
+    return SemanticSearch(
+        configurations=[SemanticConfiguration(
+            name="mySemanticConfig",
+            prioritized_fields=SemanticPrioritizedFields(
+                title_field=SemanticField(field_name="Long_Product_Name"),
+                content_fields=[
+                    SemanticField(field_name="Brand_Name"),
+                    SemanticField(field_name="GDSN_Brand"),
+                    SemanticField(field_name="Long_Product_Name"),
+                    SemanticField(field_name="Class_Name"),
+                    SemanticField(field_name="PBH"),
+                    SemanticField(field_name="Analytical_Hierarchy"),
+                    SemanticField(field_name="Benefits"),
+                    SemanticField(field_name="General_Description")
+                ],
+                keywords_fields=[
+                    SemanticField(field_name="Long_Product_Name"),
+                    SemanticField(field_name="Class_Name"),
+                    SemanticField(field_name="PBH"),
+                    SemanticField(field_name="Analytical_Hierarchy")
+                ]
+            )
+        )]
+    ) 
+
+
+def create_vector_search_config():
+    return VectorSearch(
         algorithms=[
             HnswAlgorithmConfiguration(
                 name="myHnsw"
@@ -202,13 +296,51 @@ def create_embedding_index(filtered_data, search_client):
         ]
     )
 
+def upload_documents_to_search(documents, search_client):
+    batch_size = 15
+    total_batches = (len(documents) + batch_size - 1) // batch_size  # Calculate total number of batches
+    successful_uploads = 0
+
+    for i in range(0, len(documents), batch_size):
+        batch = documents[i:i + batch_size]
+        try:
+            # Upload the batch
+            response = search_client.upload_documents(documents=batch)
+            successful_uploads += len(batch)
+            print(f"Uploaded batch {i // batch_size + 1}/{total_batches} successfully. Batch size: {len(batch)}")
+        except HttpResponseError as e:
+            print(f"Error uploading batch {i // batch_size + 1}/{total_batches}: {e}")
+            # Log the problematic batch for further inspection
+            # print(f"Problematic batch: {batch}")
+            continue
+
+    print(f"Embedding index created and documents uploaded successfully. Total successful uploads: {successful_uploads}/{len(documents)}")
+
+
+# Create an index in Azure Cognitive Search
+def create_embedding_index(filtered_data, search_client):
+    # Prepare the documents for upload
+    try:
+        # Try to load documents from JSON if they exist
+        documents = load_documents_from_json('prepared_documents.json')
+    except FileNotFoundError:
+        # If JSON file does not exist, prepare documents and save them
+        documents = prepare_documents_for_upload(filtered_data)
+
+    # Define the semantic profile configuration
+    semantic_search = create_semantic_search_config()
+
+    # Configure the vector search configuration  
+    vector_search = create_vector_search_config()
+
     # Define the embedding index schema
     index_schema = SearchIndex(
         name=index_name,
         fields=[
+            # Define the key field
             SimpleField(name="id", type=SearchFieldDataType.String, key=True, sortable=True, filterable=True, facetable=True),
             
-            # Update the embedding index to be on all fields
+            # Fields for search and filtering
             SimpleField(name="Item_Num", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True),
             SearchField(name="Description_1", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
             SearchField(name="Description_2", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
@@ -224,37 +356,27 @@ def create_embedding_index(filtered_data, search_client):
             SearchField(name="Class_Name", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
             SimpleField(name="PBH_ID", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True),
             SearchField(name="PBH", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
-            SimpleField(name="Analytical_Hierarchy_cd", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True),
+            SimpleField(name="Analytical_Hierarchy_CD", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True),
             SearchField(name="Analytical_Hierarchy", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
             SimpleField(name="Temp_Min", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True),
             SimpleField(name="Temp_Max", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True),
             SearchField(name="Benefits", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
             SearchField(name="General_Description", type=SearchFieldDataType.String, sortable=True, filterable=True, facetable=True, analyzer_name="keyword"),
             
-            SearchField(name="embedding", type=SearchFieldDataType.Collection(SearchFieldDataType.Single), vector_search_dimensions=1536, vector_search_profile_name="myHnswProfile")
+            # Vector embedding field
+            SearchField(name="embedding", type=SearchFieldDataType.Collection(SearchFieldDataType.Single), vector_search_dimensions=3072, vector_search_profile_name="myHnswProfile")
         ],
         vector_search=vector_search,
-        semantic_configurations=[semantic_config]  # Add the semantic configuration to the index
+        semantic_search=semantic_search
     )
 
     # Create the index in Azure Cognitive Search
     search_index_client = SearchIndexClient(search_client._endpoint, search_client._credential)
- 
     search_index_client.create_or_update_index(index=index_schema)
+    print(f"Index '{index_name}' created successfully.")
 
-    # Upload documents in batches
-    batch_size = 15
+    upload_documents_to_search(documents, search_client)
 
-    for i in range(0, len(documents), batch_size):
-        batch = documents[i:i + batch_size]
-        try:
-            # Upload the batch
-            response = search_client.upload_documents(documents=batch)
-            print(f"Uploaded batch {i // batch_size + 1} successfully.")
-        except HttpResponseError as e:
-            print(f"Error uploading batch {i // batch_size + 1}: {e}")
-            continue
-    print("Embedding index created and documents uploaded successfully.")
 
 # Perform vector search
 def vector_search(query):
@@ -397,7 +519,7 @@ def run_test(data, max_retries=3, retry_backoff=5):
                 # 'Class_Name',
                 # 'PBH_ID',
                 # 'PBH',
-                # 'Analytical_Hierarchy_cd',
+                # 'Analytical_Hierarchy_CD',
                 # 'Analytical_Hierarchy',
                 # 'Temp_Min',
                 # 'Temp_Max',
@@ -465,23 +587,22 @@ def evaluate_predictions(predictions, ground_truth_data):
     print(f"Hierarchy Accuracy: {hierarchy_accuracy:.2%}")
     print(f"Overall Accuracy: {overall_accuracy:.2%}")
 
-
 def main():
     # Step 1: Load the data, get the approved and initiated items
     analytical_hierarchy, item_hierarchy, approved_october_items, initiated_october_items = load_data()
-    # TODO save the approved_october_items and initiated_october_items to files
 
     # Step 2: Build an index of items with embeddings around the Approved items
+    approved_october_items = pd.read_excel("approved_october_items.xlsx", engine="openpyxl")
     create_embedding_index(approved_october_items, search_client)
 
-    # Step 3: Query the model for each Initiated item, predict the Class, PBH, Analytical_Hierarchy, and save the results
-    # TODO test with up to ~2220 items and get accuracies for Class, PBH, and Analytical_Hierarchy
-    results = run_test(initiated_october_items.head(200))
-    save_predictions(results, "predicted_october_items.xlsx") # Save the predictions
+    # # Step 3: Query the model for each Initiated item, predict the Class, PBH, Analytical_Hierarchy, and save the results
+    # # TODO test with up to ~2220 items and get accuracies for Class, PBH, and Analytical_Hierarchy
+    # results = run_test(initiated_october_items.head(200))
+    # save_predictions(results, "predicted_october_items.xlsx") # Save the predictions
 
-    # Step 4: Evaluate the predictions
-    predicted_items = pd.read_excel("predicted_october_items.xlsx", engine="openpyxl") # Load the saved predictions
-    evaluate_predictions(predicted_items, approved_october_items) # Evaluate the predictions
+    # # Step 4: Evaluate the predictions
+    # predicted_items = pd.read_excel("predicted_october_items.xlsx", engine="openpyxl") # Load the saved predictions
+    # evaluate_predictions(predicted_items, approved_october_items) # Evaluate the predictions
 
 if __name__ == "__main__":
     # Apply this function to extract matching rows for each item
