@@ -42,9 +42,22 @@ This repository provides a solution for automating product categorization using 
    Rename `.env-sample` to `.env` and update the following variables:
 
    ```env
-   AZURE_SEARCH_ENDPOINT=your_azure_search_endpoint
-   AZURE_SEARCH_KEY=your_azure_search_key
-   OPENAI_API_KEY=your_openai_api_key
+   AZURE_OPENAI_ENDPOINT="your_azure_openai_endpoint"
+   AZURE_OPENAI_KEY="your_azure_openai_key"
+   AZURE_OPENAI_API_VERSION="your_azure_openai_api_version"
+   
+   # Azure OpenAI deployment and model names
+   AZURE_OPENAI_DEPLOYMENT_NAME="your_openai_deployment_name"
+   AZURE_OPENAI_MODEL_NAME="your_openai_model_name"
+   
+   # Azure OpenAI text embedding deployment and model names
+   AZURE_OPENAI_TEXT_EMBEDDING_DEPLOYMENT_NAME="your_text_embedding_deployment_name"
+   AZURE_OPENAI_TEXT_EMBEDDING_MODEL_NAME="your_text_embedding_model_name"
+   
+   # Azure Cognitive Search credentials
+   SEARCH_SERVICE_ENDPOINT="your_search_service_endpoint"
+   SEARCH_API_KEY="your_search_api_key"
+   SEARCH_INDEX_NAME="your_search_index_name"
    ```
 
 ## Usage
