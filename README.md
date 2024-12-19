@@ -1,4 +1,4 @@
-# pfg-product-categorization
+# product-categorization
 
 TODO Turn off content filter for this. It triggers maybe once every 100 product items when classifying through gpt-4o: Content filter error: Could not parse response content as the request was rejected by the content filter
 

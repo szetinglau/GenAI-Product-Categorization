@@ -1,8 +1,10 @@
 azure-core
-pandas
-requests
-openai
 azure-search-documents
+pandas
+numpy
+requests
 python-dotenv
+openai
 openpyxl
 tenacity
+pydantic
