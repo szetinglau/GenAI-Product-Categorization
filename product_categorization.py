@@ -40,19 +40,20 @@ from openai import AzureOpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 from pydantic import BaseModel
 from datetime import datetime
+import difflib
 
 load_dotenv(override=True)
 
 # Ensure the outputs directory exists
 os.makedirs("outputs", exist_ok=True)
 
-# Create a timestamped folder within the outputs directory
+# # Create a timestamped folder within the outputs directory
 # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 # output_dir = os.path.join("outputs", timestamp)
 # os.makedirs(output_dir, exist_ok=True)
 
 # Use a fixed timestamp folder directory
-output_dir = os.path.join("outputs", "20250205_003611")
+output_dir = os.path.join("outputs", "20250205_021108")
 os.makedirs(output_dir, exist_ok=True)
 
 # Set up logging
@@ -124,23 +125,42 @@ def load_data(class_pbh_file, item_hierarchy_file, product_sku_items_file):
     # item_hierarchy_df["Hierarchy CD"] = item_hierarchy_df["Hierarchy CD"].astype(str).str.strip()
 
     logger.info("Processing approved items...")
-    approved_items = filter_and_merge_items(product_sku_items_df, 'APPROVED', item_hierarchy_df, output_dir)
+    approved_items_df = filter_and_merge_items(product_sku_items_df, 'APPROVED', item_hierarchy_df, output_dir)
     
     logger.info("Processing initiated items...")
-    initiated_items = filter_and_merge_items(product_sku_items_df, 'INITIATED', item_hierarchy_df, output_dir)
+    initiated_items_df = filter_and_merge_items(product_sku_items_df, 'INITIATED', item_hierarchy_df, output_dir)
     
-    logger.info(f"Number of approved items: {len(approved_items)}")
-    logger.info(f"Number of initiated items: {len(initiated_items)}")
+    # Clear specified classification fields in initiated_items_df
+    for col in ["Class_Name", "PBH", "Analytical_Hierarchy", "Analytical_Hierarchy_CD"]:
+        if col in initiated_items_df.columns:
+            initiated_items_df[col] = ""
+            
+    # Check if there are any non-empty rows in the specified columns of initiated_items_df
+    non_empty_rows = initiated_items_df[
+        (initiated_items_df["Class_Name"] != "") |
+        (initiated_items_df["PBH"] != "") |
+        (initiated_items_df["Analytical_Hierarchy"] != "") |
+        (initiated_items_df["Analytical_Hierarchy_CD"] != "")
+    ]
+
+    # Log a warning if there are any non-empty rows
+    if not non_empty_rows.empty:
+        logger.warning(f"Found {len(non_empty_rows)} rows in initiated items with non-empty classification fields.")
+    else:
+        logger.info("All specified classification fields in initiated items are empty.")
+    
+    logger.info(f"Number of approved items: {len(approved_items_df)}")
+    logger.info(f"Number of initiated items: {len(initiated_items_df)}")
 
     logger.info("Data loaded successfully.")
-    return class_pbh_df, item_hierarchy_df, approved_items, initiated_items
+    return class_pbh_df, item_hierarchy_df, approved_items_df, initiated_items_df
 
 # Filter items based on status
 def filter_items_by_status(items, status):
     return items[items['Status'] == status][[
         'Item_Num', 'Description_1', 'Description_2', 'GTIN', 'Brand_Id', 'Brand_Name', 
         'GDSN_Brand', 'Long_Product_Name', 'Pack', 'Size', 'Size_UOM', 'Class_Id', 
-        'Class_Name', 'PBH_ID', 'PBH', 'Analytical_Hierarchy', 'Hierarchy CD', 'Temp_Min', 'Temp_Max', 
+        'Class_Name', 'PBH_ID', 'PBH', 'Hierarchy CD', 'Temp_Min', 'Temp_Max', 
         'Benefits', 'General_Description'
     ]]
 
@@ -426,24 +446,28 @@ def evaluate_predictions(initiated_items, predicted_items, approved_items):
     # Load item hierarchy data
     item_hierarchy_file = "Item Hierarchy 11.14.2024.xlsx"
     item_hierarchy = pd.read_excel(item_hierarchy_file, engine="openpyxl")
-    # item_hierarchy["Hierarchy CD"] = item_hierarchy["Hierarchy CD"].astype(str).str.strip()  # Remove leading/trailing whitespaces
+    
+    # Normalize the "Hierarchy CD" column to remove trailing '.0'
+    item_hierarchy["Hierarchy CD"] = item_hierarchy["Hierarchy CD"].apply(
+        lambda x: str(int(x)) if pd.notnull(x) and isinstance(x, float) and x.is_integer() else str(x).strip()
+    )
 
-    # Merge predicted items with item hierarchy using status "Predicted"
-    predictions = merge_items_with_hierarchy(predicted_items, item_hierarchy, output_dir, "Predicted")
-
-    # Rename and reorder columns
-    predictions = predictions.rename(columns={
-        'Hierarchy CD': 'Analytical_Hierarchy_CD',
-        'Hierarchy Detail': 'Analytical_Hierarchy'
-    }, inplace=True)
-    # Merge predicted items with item hierarchy to get Analytical_Hierarchy_CD
+    # Single merge operation to add Hierarchy CD to predictions
     predictions = pd.merge(
         predicted_items,
         item_hierarchy[['Hierarchy CD', 'Hierarchy Detail']],
         left_on='Analytical_Hierarchy',
         right_on='Hierarchy Detail',
         how='left'
-    ).drop(columns=['Hierarchy Detail']).rename(columns={'Hierarchy CD': 'Analytical_Hierarchy_CD'})
+    ).rename(columns={'Hierarchy CD': 'Analytical_Hierarchy_CD'}).drop('Hierarchy Detail', axis=1)
+
+    # Convert Analytical_Hierarchy_CD to a consistent string format
+    predictions["Analytical_Hierarchy_CD"] = predictions["Analytical_Hierarchy_CD"].apply(
+        lambda x: str(int(x)) if pd.notnull(x) and isinstance(x, float) and x.is_integer() else str(x).strip()
+    )
+
+    logger.info(f"Predictions shape after merge: {predictions.shape}")
+    logger.info(f"Null Analytical_Hierarchy_CD count: {predictions['Analytical_Hierarchy_CD'].isnull().sum()}")
 
     # TODO add all of the other fields to the detailed comparison, not just Item_Num, Brand_Name, and Long_Product_Name
     # TODO do the same for the mismatch summary
@@ -455,26 +479,16 @@ def evaluate_predictions(initiated_items, predicted_items, approved_items):
     ]].copy()
 
     # Add initial, predicted, and actual values side by side for comparison
-    detailed_comparison["Class_Name_initial"] = initiated_items["Class_Name"].str.strip()
-    detailed_comparison["Class_Name_predicted"] = predictions["Class_Name"].str.strip()
-    detailed_comparison["Class_Name_actual"] = approved_items["Class_Name"].str.strip()
-
-    detailed_comparison["PBH_initial"] = initiated_items["PBH"].str.strip()
-    detailed_comparison["PBH_predicted"] = predictions["PBH"].str.strip()
-    detailed_comparison["PBH_actual"] = approved_items["PBH"].str.strip()
-
-    detailed_comparison["Analytical_Hierarchy_CD_initial"] = initiated_items["Analytical_Hierarchy_CD"].str.strip()
-    detailed_comparison["Analytical_Hierarchy_CD_predicted"] = predictions["Analytical_Hierarchy_CD"].str.strip()
-    detailed_comparison["Analytical_Hierarchy_CD_actual"] = approved_items["Analytical_Hierarchy_CD"].str.strip()
-
-    detailed_comparison["Analytical_Hierarchy_initial"] = initiated_items["Analytical_Hierarchy"].str.strip()
-    detailed_comparison["Analytical_Hierarchy_predicted"] = predictions["Analytical_Hierarchy"].str.strip()
-    detailed_comparison["Analytical_Hierarchy_actual"] = approved_items["Analytical_Hierarchy"].str.strip()
+    for field in ["Class_Name", "PBH", "Analytical_Hierarchy", "Analytical_Hierarchy_CD"]:
+        detailed_comparison[f"{field}_predicted"] = predictions[field].fillna("").astype(str).str.strip()
+        detailed_comparison[f"{field}_actual"] = approved_items[field].fillna("").astype(str).str.strip()
+        detailed_comparison[f"{field}_Match"] = detailed_comparison[f"{field}_predicted"] == detailed_comparison[f"{field}_actual"]
 
     # Identify mismatches
     detailed_comparison["Class_Name_Match"] = detailed_comparison["Class_Name_predicted"] == detailed_comparison["Class_Name_actual"]
     detailed_comparison["PBH_Match"] = detailed_comparison["PBH_predicted"] == detailed_comparison["PBH_actual"]
     detailed_comparison["Analytical_Hierarchy_Match"] = detailed_comparison["Analytical_Hierarchy_predicted"] == detailed_comparison["Analytical_Hierarchy_actual"]
+    detailed_comparison["Analytical_Hierarchy_CD_Match"] = detailed_comparison["Analytical_Hierarchy_CD_predicted"] == detailed_comparison["Analytical_Hierarchy_CD_actual"]
 
     # Identify Analytical_Hierarchy_CD not in item_hierarchy_file and add to each row
     detailed_comparison["Analytical_Hierarchy_CD_Not_In_Hierarchy_File"] = detailed_comparison.apply(
@@ -483,7 +497,7 @@ def evaluate_predictions(initiated_items, predicted_items, approved_items):
 
     # Create a mismatch summary
     mismatch_summary = detailed_comparison.loc[
-        ~detailed_comparison[["Class_Name_Match", "PBH_Match", "Analytical_Hierarchy_Match"]].all(axis=1)
+        ~detailed_comparison[["Class_Name_Match", "PBH_Match", "Analytical_Hierarchy_Match", "Analytical_Hierarchy_CD_Match"]].all(axis=1)
     ].reset_index(drop=True)
 
 
@@ -494,32 +508,40 @@ def evaluate_predictions(initiated_items, predicted_items, approved_items):
                 "Class_Name" if not row["Class_Name_Match"] else "",
                 "PBH" if not row["PBH_Match"] else "",
                 "Analytical_Hierarchy" if not row["Analytical_Hierarchy_Match"] else "",
+                "Analytical_Hierarchy_CD_Match" if not row["Analytical_Hierarchy_CD_Match"] else "",
                 "Missing Analytical_Hierarchy_CD" if row["Analytical_Hierarchy_CD_Not_In_Hierarchy_File"] else ""
             ])
         ),
         axis=1
     )
 
+    # NEW: Add rich-format diff columns for each field in the mismatch summary
+    for field in ["Class_Name", "PBH", "Analytical_Hierarchy", "Analytical_Hierarchy_CD"]:
+        mismatch_summary[f"{field}_Diff"] = mismatch_summary.apply(
+            lambda row: diff_format_rich(row[f"{field}_predicted"], row[f"{field}_actual"]), axis=1
+        )
+
+    # NEW: Reorder mismatch_summary columns so each _Diff column comes between predicted and actual.
+    base_cols = ["Item_Num", "Brand_Name", "Long_Product_Name"]
+    field_order = []
+    for field in ["Class_Name", "PBH", "Analytical_Hierarchy", "Analytical_Hierarchy_CD"]:
+        field_order.extend([f"{field}_predicted", f"{field}_Diff", f"{field}_actual"])
+    extra_cols = [col for col in mismatch_summary.columns if col not in base_cols + field_order]
+    new_order = base_cols + field_order + extra_cols
+    mismatch_summary = mismatch_summary[new_order]
+
     # Calculate accuracies for each field
     class_accuracy = (detailed_comparison["Class_Name_predicted"] == detailed_comparison["Class_Name_actual"]).mean()
     pbh_accuracy = (detailed_comparison["PBH_predicted"] == detailed_comparison["PBH_actual"]).mean()
     analytical_accuracy = (detailed_comparison["Analytical_Hierarchy_predicted"] == detailed_comparison["Analytical_Hierarchy_actual"]).mean()
-
-    # Calculate overall accuracy (all fields must match)
-    # This is stricter than individual field accuracies as it requires all fields to match simultaneously
-    overall_accuracy = (
-        (detailed_comparison["Class_Name_predicted"] == detailed_comparison["Class_Name_actual"]) &
-        (detailed_comparison["PBH_predicted"] == detailed_comparison["PBH_actual"]) &
-        (detailed_comparison["Analytical_Hierarchy_predicted"] == detailed_comparison["Analytical_Hierarchy_actual"])
-    ).mean()
 
     # Calculate the percentage of Analytical Hierarchy not in the hierarchy file
     analytical_hierarchy_not_in_file_percentage = detailed_comparison["Analytical_Hierarchy_CD_Not_In_Hierarchy_File"].mean()
 
     # Create a DataFrame for the accuracy summary
     accuracy_summary = pd.DataFrame({
-        "Metric": ["Class Accuracy", "PBH Accuracy", "Analytical Hierarchy Accuracy", "Overall Accuracy", "Analytical Hierarchy Not In File Percentage"],
-        "Value": [class_accuracy, pbh_accuracy, analytical_accuracy, overall_accuracy, analytical_hierarchy_not_in_file_percentage]
+        "Metric": ["Class Accuracy", "PBH Accuracy", "Analytical Hierarchy Accuracy", "Analytical Hierarchy Not In File Percentage"],
+        "Value": [class_accuracy, pbh_accuracy, analytical_accuracy, analytical_hierarchy_not_in_file_percentage]
     })
     
     # Replace NaN and Inf values with an empty string
@@ -554,6 +576,8 @@ def evaluate_predictions(initiated_items, predicted_items, approved_items):
         # Define the format for mismatches
         mismatch_format = workbook.add_format({'bg_color': '#FFCCCC'})
         red_format = workbook.add_format({'font_color': 'red'})
+        blue_format = workbook.add_format({'font_color': 'blue'})
+        custom_format = workbook.add_format({'font_color': 'red', 'bold': True, 'bg_color': '#FFCCCC'})
 
         # Apply the format to mismatched cells in Detailed Comparison
         for idx, row in detailed_comparison.iterrows():
@@ -566,6 +590,9 @@ def evaluate_predictions(initiated_items, predicted_items, approved_items):
             if not row["Analytical_Hierarchy_Match"]:
                 detailed_comparison_worksheet.write(idx + 1, detailed_comparison.columns.get_loc("Analytical_Hierarchy_predicted"), row["Analytical_Hierarchy_predicted"], mismatch_format)
                 detailed_comparison_worksheet.write(idx + 1, detailed_comparison.columns.get_loc("Analytical_Hierarchy_actual"), row["Analytical_Hierarchy_actual"], mismatch_format)
+            if not row["Analytical_Hierarchy_CD_Match"]:
+                detailed_comparison_worksheet.write(idx + 1, detailed_comparison.columns.get_loc("Analytical_Hierarchy_CD_predicted"), row["Analytical_Hierarchy_CD_predicted"], mismatch_format)
+                detailed_comparison_worksheet.write(idx + 1, detailed_comparison.columns.get_loc("Analytical_Hierarchy_CD_actual"), row["Analytical_Hierarchy_CD_actual"], mismatch_format)
             if row["Analytical_Hierarchy_CD_Not_In_Hierarchy_File"]:
                 detailed_comparison_worksheet.write(idx + 1, detailed_comparison.columns.get_loc("Analytical_Hierarchy_CD_actual"), row["Analytical_Hierarchy_CD_actual"], red_format)
                 detailed_comparison_worksheet.write(idx + 1, detailed_comparison.columns.get_loc("Analytical_Hierarchy_CD_Not_In_Hierarchy_File"), row["Analytical_Hierarchy_CD_Not_In_Hierarchy_File"], mismatch_format)
@@ -581,18 +608,89 @@ def evaluate_predictions(initiated_items, predicted_items, approved_items):
             if not row["Analytical_Hierarchy_Match"]:
                 mismatch_summary_worksheet.write(idx + 1, mismatch_summary.columns.get_loc("Analytical_Hierarchy_predicted"), row["Analytical_Hierarchy_predicted"], mismatch_format)
                 mismatch_summary_worksheet.write(idx + 1, mismatch_summary.columns.get_loc("Analytical_Hierarchy_actual"), row["Analytical_Hierarchy_actual"], mismatch_format)
+            if not row["Analytical_Hierarchy_CD_Match"]:
+                mismatch_summary_worksheet.write(idx + 1, mismatch_summary.columns.get_loc("Analytical_Hierarchy_CD_predicted"), row["Analytical_Hierarchy_CD_predicted"], mismatch_format)
+                mismatch_summary_worksheet.write(idx + 1, mismatch_summary.columns.get_loc("Analytical_Hierarchy_CD_actual"), row["Analytical_Hierarchy_CD_actual"], mismatch_format)
             if row["Analytical_Hierarchy_CD_Not_In_Hierarchy_File"]:
                 mismatch_summary_worksheet.write(idx + 1, mismatch_summary.columns.get_loc("Analytical_Hierarchy_CD_actual"), row["Analytical_Hierarchy_CD_actual"], red_format)
                 mismatch_summary_worksheet.write(idx + 1, mismatch_summary.columns.get_loc("Analytical_Hierarchy_CD_Not_In_Hierarchy_File"), row["Analytical_Hierarchy_CD_Not_In_Hierarchy_File"], mismatch_format)
+
+
+        # Apply the format to mismatched cells in Mismatch Summary
+        for i, row in mismatch_summary.iterrows():
+            for field in ["Class_Name", "PBH", "Analytical_Hierarchy", "Analytical_Hierarchy_CD"]:
+                col = mismatch_summary.columns.get_loc(f"{field}_Diff")
+                if field == "Analytical_Hierarchy" and not row[f"{field}_Match"]:
+                    # Highlight using diff for Analytical_Hierarchy.
+                    rich_text = highlight_hierarchy_diff(row["Analytical_Hierarchy_predicted"], row["Analytical_Hierarchy_actual"], red_format, blue_format)
+                    mismatch_summary_worksheet.write_rich_string(i+1, col, *rich_text)
+                elif not row[f"{field}_Match"]:
+                    # Use diff_format_words for other fields.
+                    rich_text = diff_format_words(row[f"{field}_predicted"], row[f"{field}_actual"], red_format, blue_format)
+                    mismatch_summary_worksheet.write_rich_string(i+1, col, *rich_text)
 
     return {
         "Class Accuracy": class_accuracy,
         "PBH Accuracy": pbh_accuracy,
         "Analytical Hierarchy Accuracy": analytical_accuracy,
-        "Overall Accuracy": overall_accuracy,
         "Detailed Comparison": detailed_comparison,
         "Mismatch Summary": mismatch_summary
     }
+    
+
+def diff_format_rich(predicted, actual):
+    diff = difflib.ndiff(actual.split(), predicted.split())
+    rich_text = ""
+    for token in diff:
+        if token.startswith('- '):
+            rich_text += f"<span style='color:red'>{token[2:]}</span> "
+        elif token.startswith('+ '):
+            rich_text += f"<span style='color:blue'>{token[2:]}</span> "
+        else:
+            rich_text += token[2:] + " "
+    return rich_text.strip()
+
+
+def diff_format_words(predicted, actual, red_format, blue_format):
+    # Use difflib to get a diff between actual and predicted words.
+    actual_words = actual.split()
+    predicted_words = predicted.split()
+    diff = list(difflib.ndiff(actual_words, predicted_words))
+    rich_text = []
+    for token in diff:
+        if token.startswith('- '):
+            # Removed word: highlight it in red.
+            rich_text.extend([blue_format, token[2:] + " "])
+        elif token.startswith('+ '):
+            # Added word: can be ignored or indicated as additional.
+            rich_text.extend([red_format, f"(+{token[2:]}) "])
+        else:
+            # Common word: normal text.
+            rich_text.append(token[2:] + " ")
+    return rich_text
+
+def highlight_hierarchy_diff(predicted, actual, red_format, blue_format):
+    # Split each hierarchy into segments.
+    pred_segs = [seg.strip() for seg in predicted.split(">>")]
+    act_segs = [seg.strip() for seg in actual.split(">>")]
+    rich_text = []
+    # Loop over each segment and highlight differences.
+    for i in range(max(len(pred_segs), len(act_segs))):
+        pred_seg = pred_segs[i] if i < len(pred_segs) else ""
+        act_seg = act_segs[i] if i < len(act_segs) else ""
+        if pred_seg == act_seg:
+            rich_text.append(act_seg + ">>")
+        else:
+            # Highlight diff between the segments.
+            seg_diff = diff_format_words(pred_seg, act_seg, red_format, blue_format)
+            rich_text.extend(seg_diff)
+            if i < len(act_segs) - 1:
+                rich_text.append(">>")
+    # Remove trailing separator if any.
+    if rich_text and rich_text[-1] == ">>":
+        rich_text = rich_text[:-1]
+    return rich_text
+
 
 def construct_query_text(row):
     """
@@ -620,6 +718,15 @@ def hybrid_search(row, search_client, top_k=5):
     """
     # Construct query text
     query_text = construct_query_text(row)
+    
+    # select=["Class_Name", "PBH", "Analytical_Hierarchy", "Analytical_Hierarchy_CD"],
+    
+    fields = [
+        "Item_Num", "Description_1", "Description_2", "GTIN", "Brand_Id", "Brand_Name", 
+        "GDSN_Brand", "Long_Product_Name", "Pack", "Size", "Size_UOM", "Class_Id", 
+        "Class_Name", "PBH_ID", "PBH", "Analytical_Hierarchy_CD", "Analytical_Hierarchy", 
+        "Temp_Min", "Temp_Max", "Benefits", "General_Description"
+    ]
 
     # Define vector query
     vector_query = VectorizableTextQuery(
@@ -633,7 +740,7 @@ def hybrid_search(row, search_client, top_k=5):
         search_text=query_text,
         semantic_configuration_name="mySemanticConfig",
         vector_queries=[vector_query],
-        select=["Class_Name", "PBH", "Analytical_Hierarchy", "Analytical_Hierarchy_CD"],
+        select=fields,
         top=top_k
     )
 
@@ -664,17 +771,20 @@ def build_classification_prompt(row, search_results):
         product_details += f"- {field.replace('_', ' ').title()}: {row.get(field, '')}\n"
     
     prompt = f"""
-You are a **product classification expert** tasked with assigning the most accurate **Class Name, PBH (Product Book Handler), and Analytical Hierarchy** to a given product based on its details and retrieved search results.
+You are a **product classification expert** tasked with assigning the most accurate **Class Name, PBH (Product Book Handler), and Analytical Hierarchy** for a product. You will use both the detailed product data from the data entry tool and the top search results retrieved through Azure AI Search from over 5000 indexed products.
 
 ### **Objective** ###
-- Your goal is to analyze the provided product information and compare it to the retrieved search results.
-- Choose the classification that best aligns with **product attributes, description, and hierarchy rules**.
+- Review the provided product details.
+- Analyze the search results that are very similar to the input.
+- Precisely determine the product classification focusing on:
+    • Class Name  
+    • PBH  
+    • Analytical Hierarchy (and its corresponding Cd) — note that there are over 3000 options, making accuracy in this field absolutely critical.
 
 ### **Classification Criteria** ###
-When selecting the best match, consider:
-1. **Relevance to Class Name** → Does the search result describe the same product category?
-2. **Alignment with PBH** → Does it fit within the correct PBH category?
-3. **Consistency with Long Product Name** → Does the full product description confirm the classification?
+1. **Relevance to Class Name:** How well does the search result match the product category?
+2. **Alignment with PBH:** Does the search result fall under the correct product book handler grouping?
+3. **Precise Match for Analytical Hierarchy:** Ensure the detailed Analytical Hierarchy and its Cd are correct.
 
 ### **Product Information** ###
 {product_details}
@@ -682,33 +792,22 @@ When selecting the best match, consider:
 ### **Search Results** ###
 """
     if not search_results:
-        prompt += "\n(No search results were found. If no strong match exists, suggest a possible classification based on the product details.)\n"
+        prompt += "\n(No search results were found. Proceed using only the product details.)\n"
         logger.warning("No search results found.")
     else:
         for i, result in enumerate(search_results):
             prompt += f"\n#### Match {i+1} ####\n"
             for field in fields:
                 prompt += f"- {field.replace('_', ' ').title()}: {result.get(field, '')}\n"
-
+    
     prompt += """
 
-### **Task Instructions** ###
-1. **Compare** the product details with the search results.
-2. **Evaluate** each search result based on the criteria above.
-3. **Select** the best match or suggest a classification if no strong match is found.
-
 ### **Expected Response Format** ###
-Respond in the following format:
-Class Name: 
-PBH: 
-Analytical Hierarchy: 
-
-Reasoning:
-        •       (Explain why this classification was chosen based on the criteria.)
-        •       (If no strong match, provide a reasoning-based classification suggestion.)
-If multiple matches are equally strong, explain why and suggest the **most appropriate** choice.
----
-"""
+Respond in exactly the following format:
+Class Name: <value>
+PBH: <value>
+Analytical Hierarchy: <value>
+---"""
     logger.info("Prompt to GPT-4o-mini:")
     logger.info(prompt)
     return prompt
@@ -755,24 +854,24 @@ def predict_classifications(initiated_data, search_client):
         # Perform hybrid search
         search_results = hybrid_search(row, search_client)
 
-        logger.info(f"Search results for item {row['Item_Num']}:")
-        results_exist = False
-        for result in search_results:
-            logger.info(result)
-            results_exist = True
+        # logger.info(f"Search results for item {row['Item_Num']}:")
+        # results_exist = False
+        # for result in search_results:
+        #     logger.info(result)
+        #     results_exist = True
 
-        if not results_exist:
-            logger.info(f"No search results for item {row['Item_Num']}.")
+        # if not results_exist:
+        #     logger.info(f"No search results for item {row['Item_Num']}.")
 
         # Generate the best prediction (commented out for debugging purposes)
-        # prediction = choose_best_prediction(search_results, row)
-        # if prediction:
-        #     predictions.append({
-        #         "Item_Num": row["Item_Num"],
-        #         "Class_Name": prediction.class_name,
-        #         "PBH": prediction.pbh,
-        #         "Analytical_Hierarchy": prediction.analytical_hierarchy
-        #     })
+        prediction = choose_best_prediction(search_results, row)
+        if prediction:
+            predictions.append({
+                "Item_Num": row["Item_Num"],
+                "Class_Name": prediction.class_name,
+                "PBH": prediction.pbh,
+                "Analytical_Hierarchy": prediction.analytical_hierarchy
+            })
 
         # Log progress
         if idx % 10 == 0 or idx == total_items:
@@ -796,22 +895,27 @@ def main():
     # )
     # approved_items_df.to_excel(os.path.join(output_dir, "approved_items.xlsx"), index=False, engine='openpyxl')
     # initiated_items_df.to_excel(os.path.join(output_dir, "initiated_items.xlsx"), index=False, engine='openpyxl')
-
-    # # Step 2: Build an index of items with embeddings around the Approved items
-    # approved_items = pd.read_excel(os.path.join(output_dir, "approved_items.xlsx"), engine="openpyxl")
-    # logger.info(f"Number of approved items: {len(approved_items)}")
-    # create_embedding_index(approved_items, search_client)
+    
+    # Reload the approved and initiated items from the saved files
+    approved_items_df = pd.read_excel(os.path.join(output_dir, "approved_items.xlsx"), engine="openpyxl")
+    initiated_items_df = pd.read_excel(os.path.join(output_dir, "initiated_items.xlsx"), engine="openpyxl")
+    
+    
+    # Step 2: Build an index of items with embeddings around the Approved items
+    # logger.info(f"Number of approved items: {len(approved_items_df)}")
+    # create_embedding_index(approved_items_df, search_client)
+    # # TODO break up creat embedding index function into creating the embeddings, preparing the documents,  creating the index, and uploading the documents.
 
     # Step 3: Predict the Class, PBH, Analytical_Hierarchy, and save the results
-    initiated_items = pd.read_excel(os.path.join(output_dir, "initiated_items.xlsx"), engine="openpyxl")
-    predictions = predict_classifications(initiated_items, search_client)
-    predictions.to_excel(os.path.join(output_dir, "predicted_results.xlsx"), index=False, engine="openpyxl")
+    # initiated_items = pd.read_excel(os.path.join(output_dir, "initiated_items.xlsx"), engine="openpyxl")
+    # predictions = predict_classifications(initiated_items, search_client)
+    # predictions.to_excel(os.path.join(output_dir, "predicted_results.xlsx"), index=False, engine="openpyxl")
 
-    # # Step 4: Evaluate the predictions
-    # predictions = pd.read_excel(os.path.join(output_dir, "predicted_results.xlsx"), engine="openpyxl").head(100)
-    # accuracy = evaluate_predictions(initiated_items, predictions, approved_items)
-    # logger.info("Accuracy Summary:")
-    # logger.info(accuracy)
+    # Step 4: Evaluate the predictions
+    predictions_df = pd.read_excel(os.path.join(output_dir, "predicted_results.xlsx"), engine="openpyxl")
+    accuracy = evaluate_predictions(initiated_items_df, predictions_df, approved_items_df)
+    logger.info("Accuracy Summary:")
+    logger.info(accuracy)
 
 if __name__ == "__main__":
     main()
