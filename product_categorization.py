@@ -1,10 +1,10 @@
 '''
-TODO Turn off content filter for this. It triggers maybe once every 100 product items when classifying through gpt-4o: Content filter error: Could not parse response content as the request was rejected by the content filter
-TODO Need to spit out each search results + prompt going to GPT-4o for verification purposes
-TODO Update Readme as this might be a highly repeatable solution
-TODO Deployable solution idea: Web UI, drop in a file in this format, columns, rows, each even row hasn't been looked at, each odd row is ground truth. Spits out the accuracy of having Azure AI Search + GPT-4o/4o-mini/o1 make the product categorization
-TODO Make a One Click Deploy, yes it'll be painful, but do it and you enhance repeatability
-TODO Test with Blanks on Class
+# - TODO Turn off content filter for this. It triggers maybe once every 100 product items when classifying through gpt-4o: Content filter error: Could not parse response content as the request was rejected by the content filter
+- TODO Need to spit out each search results + prompt going to GPT-4o-mini for verification purposes
+- TODO Update Readme as this might be a highly repeatable solution
+- TODO Deployable solution idea: Web UI, drop in a file in this format, columns, rows, each even row hasn't been looked at, each odd row is ground truth. Spits out the accuracy of having Azure AI Search + GPT-4o/4o-mini/o1 make the product categorization
+- TODO Make a One Click Deploy, yes it'll be painful, but do it and you enhance repeatability
+- TODO Test with Blanks on Class
 '''
 
 import openai
@@ -12,6 +12,7 @@ import pandas as pd
 import numpy as np
 import requests, json, os
 import time
+import logging
 
 from azure.core.exceptions import HttpResponseError
 from azure.search.documents import SearchClient
@@ -38,8 +39,29 @@ from dotenv import load_dotenv
 from openai import AzureOpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 from pydantic import BaseModel
+from datetime import datetime
 
 load_dotenv(override=True)
+
+# Ensure the outputs directory exists
+os.makedirs("outputs", exist_ok=True)
+
+# Create a timestamped folder within the outputs directory
+# timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+# output_dir = os.path.join("outputs", timestamp)
+# os.makedirs(output_dir, exist_ok=True)
+
+# Use a fixed timestamp folder directory
+output_dir = os.path.join("outputs", "20250205_003611")
+os.makedirs(output_dir, exist_ok=True)
+
+# Set up logging
+log_file = os.path.join(output_dir, "execution.log")
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', handlers=[
+    logging.FileHandler(log_file),
+    logging.StreamHandler()
+])
+logger = logging.getLogger()
 
 # Azure OpenAI credentials
 azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")  # Replace with your Azure OpenAI endpoint
@@ -53,7 +75,7 @@ text_embedding_deployment_name = os.getenv("AZURE_OPENAI_TEXT_EMBEDDING_DEPLOYME
 text_embedding_model_name = os.getenv("AZURE_OPENAI_TEXT_EMBEDDING_MODEL_NAME")
 
 # Initialize the Azure OpenAI client
-client = AzureOpenAI(
+aoai_client = AzureOpenAI(
             azure_endpoint=azure_openai_endpoint,
             api_version=azure_api_version,
             api_key=azure_openai_key,
@@ -74,56 +96,79 @@ fields = [
 ]
 
 # Load the input data
-def load_data():
-    # Replace these file paths with the actual paths
-    analytical_hierarchy_file = "Analytical Hierarchy_Class_PBH.xlsx"
-    item_hierarchy_file = "Item Hierarchy 11.14.2024.xlsx"
-    october_list_file = "October Items.xlsx"
-
+def load_data(class_pbh_file, item_hierarchy_file, product_sku_items_file):
     # Load data into pandas DataFrames
-    analytical_hierarchy = pd.read_excel(analytical_hierarchy_file, sheet_name=0, engine="openpyxl")
-    item_hierarchy = pd.read_excel(item_hierarchy_file, engine="openpyxl")
-    october_items = pd.read_excel(october_list_file, engine="openpyxl")
+    class_pbh_df = pd.read_excel(class_pbh_file, engine="openpyxl")
+    item_hierarchy_df = pd.read_excel(item_hierarchy_file, engine="openpyxl")
+    product_sku_items_df = pd.read_excel(product_sku_items_file, engine="openpyxl")
 
-    october_items["Analytical_Hierarchy"] = october_items["Analytical_Hierarchy"].str.strip() # Remove leading/trailing whitespaces
-    item_hierarchy["Hierarchy CD"] = item_hierarchy["Hierarchy CD"].astype(str).str.strip() # Remove leading/trailing whitespaces
+    # Log the size of each DataFrame
+    logger.info(f"Class PBH DataFrame size: {class_pbh_df.shape}")
+    logger.info(f"Item Hierarchy DataFrame size: {item_hierarchy_df.shape}")
+    logger.info(f"Product SKU Items DataFrame size: {product_sku_items_df.shape}")
 
-    # TODO Only take items from the october_items that have hierarchies that are in the item_hierarchy reference file
+    # Log unique values in the Status column
+    logger.info(f"Unique values in Status column: {product_sku_items_df['Status'].unique()}")
 
-    approved_october_items = filter_and_merge_items(october_items, 'Approved', item_hierarchy)
-    initiated_october_items = filter_and_merge_items(october_items, 'Initiated', item_hierarchy)
-    # print(f"Number of approved items: {len(approved_october_items)}")
-    # print(f"Number of initiated items: {len(initiated_october_items)}")
+    # Log the length of the item hierarchy DataFrame before filtering
+    logger.info(f"Item Hierarchy DataFrame length before filtering: {len(item_hierarchy_df)}")
 
-    print("Data loaded successfully.")
-    return analytical_hierarchy, item_hierarchy, approved_october_items, initiated_october_items
+    # Filter rows based on column C
+    item_hierarchy_df = item_hierarchy_df[item_hierarchy_df.iloc[:, 2] == 'USE THESE VALUES']
+
+    # Log the length of the item hierarchy DataFrame after filtering
+    logger.info(f"Item Hierarchy DataFrame length after filtering: {len(item_hierarchy_df)}")
+
+    # Convert to string and remove leading/trailing whitespaces prior to merging
+    # product_sku_items_df["Hierarchy CD"] = product_sku_items_df["Hierarchy CD"].astype(str).str.strip()
+    # item_hierarchy_df["Hierarchy CD"] = item_hierarchy_df["Hierarchy CD"].astype(str).str.strip()
+
+    logger.info("Processing approved items...")
+    approved_items = filter_and_merge_items(product_sku_items_df, 'APPROVED', item_hierarchy_df, output_dir)
+    
+    logger.info("Processing initiated items...")
+    initiated_items = filter_and_merge_items(product_sku_items_df, 'INITIATED', item_hierarchy_df, output_dir)
+    
+    logger.info(f"Number of approved items: {len(approved_items)}")
+    logger.info(f"Number of initiated items: {len(initiated_items)}")
+
+    logger.info("Data loaded successfully.")
+    return class_pbh_df, item_hierarchy_df, approved_items, initiated_items
 
 # Filter items based on status
 def filter_items_by_status(items, status):
     return items[items['Status'] == status][[
         'Item_Num', 'Description_1', 'Description_2', 'GTIN', 'Brand_Id', 'Brand_Name', 
         'GDSN_Brand', 'Long_Product_Name', 'Pack', 'Size', 'Size_UOM', 'Class_Id', 
-        'Class_Name', 'PBH_ID', 'PBH', 'Analytical_Hierarchy', 'Temp_Min', 'Temp_Max', 
+        'Class_Name', 'PBH_ID', 'PBH', 'Analytical_Hierarchy', 'Hierarchy CD', 'Temp_Min', 'Temp_Max', 
         'Benefits', 'General_Description'
     ]]
 
 
-# Merge items with hierarchy
-def merge_items_with_hierarchy(filtered_items, item_hierarchy):
+def merge_items_with_hierarchy(filtered_items, item_hierarchy, output_dir, status):
     merged_data = pd.merge(
         filtered_items,
         item_hierarchy,
-        left_on="Analytical_Hierarchy",
+        left_on="Hierarchy CD",
         right_on="Hierarchy CD",
+        # on="Hierarchy CD",
         how="left"
     )
+    
+    # Only take items from the product sku items that have hierarchies that are in the item_hierarchy reference file
+    missing = merged_data[merged_data['Hierarchy Detail'].isnull()]
+    if not missing.empty:
+        logger.warning("Warning: The following items have missing hierarchies in the reference file:")
+        logger.warning(missing[['Item_Num', 'Hierarchy CD']])
+        missing_csv_path = os.path.join(output_dir, f"{status.lower()}_items_missing_hierarchies.csv")
+        missing[['Item_Num', 'Hierarchy CD']].to_csv(missing_csv_path, index=False)
     return merged_data
 
 
 # Rename and reorder columns
 def rename_and_reorder_columns(merged_data):
     merged_data.rename(columns={
-        'Analytical_Hierarchy': 'Analytical_Hierarchy_CD',
+        'Hierarchy CD': 'Analytical_Hierarchy_CD',
         'Hierarchy Detail': 'Analytical_Hierarchy'
     }, inplace=True)
     merged_data = merged_data[fields]
@@ -131,9 +176,9 @@ def rename_and_reorder_columns(merged_data):
 
 
 # Filter and merge items based on status and hierarchy
-def filter_and_merge_items(items, status, item_hierarchy):
+def filter_and_merge_items(items, status, item_hierarchy, output_dir):
     filtered_items = filter_items_by_status(items, status)
-    merged_data = merge_items_with_hierarchy(filtered_items, item_hierarchy)
+    merged_data = merge_items_with_hierarchy(filtered_items, item_hierarchy, output_dir, status)
     final_data = rename_and_reorder_columns(merged_data)
     return final_data
 
@@ -144,20 +189,21 @@ def generate_embedding(text):
     """
     Generate embeddings using Azure OpenAI with retry logic
     """
-    response = client.embeddings.create(input=[text], model=text_embedding_model_name)
+    response = aoai_client.embeddings.create(input=[text], model=text_embedding_model_name)
     return response.data[0].embedding
 
 
 def save_documents_to_json(documents, filename):
-    with open(filename, 'w') as f:
+    with open(os.path.join(output_dir, filename), 'w') as f:
         json.dump(documents, f)
     print(f"Documents saved to {filename}")
 
 
 def load_documents_from_json(filename):
-    with open(filename, 'r') as f:
+    file_path = os.path.join(output_dir, filename)  # Use output_dir
+    with open(file_path, 'r') as f:
         documents = json.load(f)
-    print(f"Documents loaded from {filename}")
+    print(f"Documents loaded from {file_path}")
     return documents
 
 
@@ -170,8 +216,8 @@ def clean_value(value):
     return str(value)
 
 
-def prepare_documents_for_upload(filtered_data):
-    print(f"Preparing {len(filtered_data)} documents for upload...")
+def create_embeddings_and_documents(product_data):
+    print(f"Preparing {len(product_data)} documents for upload...")
     documents = []
     # Filter the fields to be used for embedding
     embedding_fields = [
@@ -180,7 +226,7 @@ def prepare_documents_for_upload(filtered_data):
         "Analytical_Hierarchy", "Temp_Min", "Temp_Max", "Benefits", "General_Description"
     ]
 
-    for idx, row in filtered_data.iterrows():
+    for idx, row in product_data.iterrows():
         # if idx >= 100:
         #     break
 
@@ -266,22 +312,24 @@ def upload_documents_to_search(documents, search_client):
 
     for i in range(0, len(documents), batch_size):
         batch = documents[i:i + batch_size]
+        batch_ids = ", ".join([str(doc["id"]) for doc in batch])
+        logger.info(f"Uploading batch {i // batch_size + 1}/{total_batches} with document IDs: {batch_ids}")
         try:
             # Upload the batch
             response = search_client.upload_documents(documents=batch)
+            uploaded_ids = ", ".join([str(doc["id"]) for doc in batch])
             successful_uploads += len(batch)
-            print(f"Uploaded batch {i // batch_size + 1}/{total_batches} successfully. Batch size: {len(batch)}")
+            logger.info(f"Uploaded batch {i // batch_size + 1}/{total_batches} successfully. Batch size: {len(batch)}. Document IDs: {uploaded_ids}")
         except HttpResponseError as e:
-            print(f"Error uploading batch {i // batch_size + 1}/{total_batches}: {e}")
-            # Log the problematic batch for further inspection
-            # print(f"Problematic batch: {batch}")
+            logger.error(f"Error uploading batch {i // batch_size + 1}/{total_batches}: {e}")
+            logger.error(f"Problematic batch document IDs: {batch_ids}")
             continue
 
-    print(f"Embedding index created and documents uploaded successfully. Total successful uploads: {successful_uploads}/{len(documents)}")
+    logger.info(f"Embedding index created and documents uploaded successfully. Total successful uploads: {successful_uploads}/{len(documents)}")
 
 
 # Create an index in Azure Cognitive Search
-def create_embedding_index(filtered_data, search_client):
+def create_embedding_index(product_data, search_client):
 
     """
     # TODO Enrich the item hierarchy data:
@@ -310,7 +358,7 @@ def create_embedding_index(filtered_data, search_client):
         documents = load_documents_from_json('prepared_documents.json')
     except FileNotFoundError:
         # If JSON file does not exist, prepare documents and save them
-        documents = prepare_documents_for_upload(filtered_data)
+        documents = create_embeddings_and_documents(product_data)
 
     # Define the semantic profile configuration
     semantic_search = create_semantic_search_config()
@@ -378,14 +426,14 @@ def evaluate_predictions(initiated_items, predicted_items, approved_items):
     # Load item hierarchy data
     item_hierarchy_file = "Item Hierarchy 11.14.2024.xlsx"
     item_hierarchy = pd.read_excel(item_hierarchy_file, engine="openpyxl")
-    item_hierarchy["Hierarchy CD"] = item_hierarchy["Hierarchy CD"].astype(str).str.strip()  # Remove leading/trailing whitespaces
+    # item_hierarchy["Hierarchy CD"] = item_hierarchy["Hierarchy CD"].astype(str).str.strip()  # Remove leading/trailing whitespaces
 
-    # Merge predicted items with item hierarchy
-    predictions = merge_items_with_hierarchy(predicted_items, item_hierarchy)
+    # Merge predicted items with item hierarchy using status "Predicted"
+    predictions = merge_items_with_hierarchy(predicted_items, item_hierarchy, output_dir, "Predicted")
 
     # Rename and reorder columns
     predictions = predictions.rename(columns={
-        'Analytical_Hierarchy': 'Analytical_Hierarchy_CD',
+        'Hierarchy CD': 'Analytical_Hierarchy_CD',
         'Hierarchy Detail': 'Analytical_Hierarchy'
     }, inplace=True)
     # Merge predicted items with item hierarchy to get Analytical_Hierarchy_CD
@@ -479,7 +527,7 @@ def evaluate_predictions(initiated_items, predicted_items, approved_items):
     mismatch_summary = mismatch_summary.replace([np.nan, np.inf, -np.inf], '')
 
     # Save all results to a single Excel file with multiple tabs
-    with pd.ExcelWriter("evaluation_results.xlsx", engine="xlsxwriter") as writer:
+    with pd.ExcelWriter(os.path.join(output_dir, "evaluation_results.xlsx"), engine="xlsxwriter") as writer:
         # Tab 1: Initiated Items
         initiated_items.to_excel(writer, sheet_name="Initiated Items", index=False)
 
@@ -585,7 +633,7 @@ def hybrid_search(row, search_client, top_k=5):
         search_text=query_text,
         semantic_configuration_name="mySemanticConfig",
         vector_queries=[vector_query],
-        select=["Class_Name", "PBH", "Analytical_Hierarchy"],
+        select=["Class_Name", "PBH", "Analytical_Hierarchy", "Analytical_Hierarchy_CD"],
         top=top_k
     )
 
@@ -606,48 +654,63 @@ def build_classification_prompt(row, search_results):
     """
     Build the GPT-4 prompt based on the product details and search results.
     """
-    product_details = "Product Details:\n"
-
-    # TODO empty the class_name, pbh, and analytical_hierarchy fields before adding the prompt
-    for field in fields:
-        product_details += f"    - {field.replace('_', ' ').title()}: {row.get(field, '')}\n"
-        
-    prompt = f"""
-        You are a product classification expert. Your task is to evaluate the search results for the product described below and determine a classification for Class Name, PBH, and Analytical Hierarchy that best matches a product's details. Use the product's fields to guide your reasoning.
-
-        Evaluate the predictions based on the following criteria:
-        1. Relevance to the Class Name.
-        2. Alignment with the PBH (Product Book Handler).
-        3. Consistency with the Long Product Name.
-
-        For each prediction, use your reasoning to analyze how well it matches the product details. Then, based on your analysis, select the Class Name, PBH, and Analytical Hierarchy that provides the most accurate categorization.
-
-        {product_details}
-
-        Search Results:
-        """
+    # Clear classification fields before prompting
+    row["Class_Name"] = ""
+    row["PBH"] = ""
+    row["Analytical_Hierarchy"] = ""
     
+    product_details = "### Product Details ###\n"
+    for field in fields:
+        product_details += f"- {field.replace('_', ' ').title()}: {row.get(field, '')}\n"
+    
+    prompt = f"""
+You are a **product classification expert** tasked with assigning the most accurate **Class Name, PBH (Product Book Handler), and Analytical Hierarchy** to a given product based on its details and retrieved search results.
+
+### **Objective** ###
+- Your goal is to analyze the provided product information and compare it to the retrieved search results.
+- Choose the classification that best aligns with **product attributes, description, and hierarchy rules**.
+
+### **Classification Criteria** ###
+When selecting the best match, consider:
+1. **Relevance to Class Name** → Does the search result describe the same product category?
+2. **Alignment with PBH** → Does it fit within the correct PBH category?
+3. **Consistency with Long Product Name** → Does the full product description confirm the classification?
+
+### **Product Information** ###
+{product_details}
+
+### **Search Results** ###
+"""
     if not search_results:
-        print("No search results found.")
+        prompt += "\n(No search results were found. If no strong match exists, suggest a possible classification based on the product details.)\n"
+        logger.warning("No search results found.")
     else:
         for i, result in enumerate(search_results):
-            prompt += f"{i+1}. \n"
+            prompt += f"\n#### Match {i+1} ####\n"
             for field in fields:
-                prompt += f"    {field.replace('_', ' ').title()}: {result.get(field, '')}\n"
-            prompt += "\n"
+                prompt += f"- {field.replace('_', ' ').title()}: {result.get(field, '')}\n"
 
     prompt += """
-        Based on the product details and search results, select the best match for:
-        - Class Name
-        - PBH
-        - Analytical Hierarchy
-        
-        Provide your response as:
-        - Class Name:
-        - PBH:
-        - Analytical Hierarchy:
-    """
-    
+
+### **Task Instructions** ###
+1. **Compare** the product details with the search results.
+2. **Evaluate** each search result based on the criteria above.
+3. **Select** the best match or suggest a classification if no strong match is found.
+
+### **Expected Response Format** ###
+Respond in the following format:
+Class Name: 
+PBH: 
+Analytical Hierarchy: 
+
+Reasoning:
+        •       (Explain why this classification was chosen based on the criteria.)
+        •       (If no strong match, provide a reasoning-based classification suggestion.)
+If multiple matches are equally strong, explain why and suggest the **most appropriate** choice.
+---
+"""
+    logger.info("Prompt to GPT-4o-mini:")
+    logger.info(prompt)
     return prompt
 
 
@@ -659,13 +722,13 @@ def choose_best_prediction(search_results, row):
     prompt = build_classification_prompt(row, search_results)
 
     try:
-        response = client.beta.chat.completions.parse(
-            model=openai_model_name, # TODO Change the model to GPT-4o mini
+        response = aoai_client.beta.chat.completions.parse(
+            model=openai_model_name,
             messages=[
                 {"role": "system", "content": "You are an expert in product categorization."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=500,
+            max_tokens=1000,
             temperature=0,
             response_format=ProductClassification
         )
@@ -674,57 +737,81 @@ def choose_best_prediction(search_results, row):
         return prediction
 
     except openai.ContentFilterFinishReasonError as e:
-        print(f"Content filter error: {e}")
-        print(f"Problematic prompt: {prompt}")
+        logger.error(f"Content filter error: {e}")
+        logger.error(f"Problematic prompt: {prompt}")
         return None
 
+    except Exception as e:
+        logger.error(f"An error occurred: {e}")
+        logger.error(f"Problematic prompt: {prompt}")
+        return None
 
-def predict_classifications(initiated_data, search_client, gpt_client):
+def predict_classifications(initiated_data, search_client):
     predictions = []
     total_items = len(initiated_data)
+    logger.info(f"Total initiated items: {total_items}")  # Print total items for debugging
 
     for idx, (_, row) in enumerate(initiated_data.iterrows(), start=1):
         # Perform hybrid search
         search_results = hybrid_search(row, search_client)
 
-        # Generate the best prediction
-        prediction = choose_best_prediction(search_results, row)
-        if prediction:
-            predictions.append({
-                "Item_Num": row["Item_Num"],
-                "Class_Name": prediction.class_name,
-                "PBH": prediction.pbh,
-                "Analytical_Hierarchy": prediction.analytical_hierarchy
-            })
+        logger.info(f"Search results for item {row['Item_Num']}:")
+        results_exist = False
+        for result in search_results:
+            logger.info(result)
+            results_exist = True
+
+        if not results_exist:
+            logger.info(f"No search results for item {row['Item_Num']}.")
+
+        # Generate the best prediction (commented out for debugging purposes)
+        # prediction = choose_best_prediction(search_results, row)
+        # if prediction:
+        #     predictions.append({
+        #         "Item_Num": row["Item_Num"],
+        #         "Class_Name": prediction.class_name,
+        #         "PBH": prediction.pbh,
+        #         "Analytical_Hierarchy": prediction.analytical_hierarchy
+        #     })
 
         # Log progress
         if idx % 10 == 0 or idx == total_items:
-            print(f"Processed {idx}/{total_items} items")
+            logger.info(f"Processed {idx}/{total_items} items")
 
     return pd.DataFrame(predictions)
 
 
 def main():
-    # Step 1: Load the data, get the approved and initiated items
-    analytical_hierarchy, item_hierarchy, approved_october_items, initiated_october_items = load_data()
-    approved_october_items.to_excel("approved_october_items.xlsx", index=False, engine='openpyxl')
-    initiated_october_items.to_excel("initiated_october_items.xlsx", index=False, engine='openpyxl')
+    # File paths
+    
+    # item_hierarchy_file = "Item Hierarchy 11.14.2024.xlsx"
+    # product_sku_items_file = "October Items.xlsx"
+    class_pbh_file = "Class PBH.xlsx" # Has the Class, PBH
+    item_hierarchy_file = "UPDATED HIERARCHY LIST.xlsx" # Has the Analytical Hierarchy
+    product_sku_items_file = "Initiated and Approved Items V2.xlsx" # Has the Approved and Initiated items for a duration of time (i.e. weeks, months)
 
-    # Step 2: Build an index of items with embeddings around the Approved items
-    approved_october_items = pd.read_excel("approved_october_items.xlsx", engine="openpyxl").head(100)
-    create_embedding_index(approved_october_items, search_client)
+    # # Step 1: Load the data, get the approved and initiated items
+    # class_pbh_df, item_hierarchy_df, approved_items_df, initiated_items_df = load_data(
+    #     class_pbh_file, item_hierarchy_file, product_sku_items_file
+    # )
+    # approved_items_df.to_excel(os.path.join(output_dir, "approved_items.xlsx"), index=False, engine='openpyxl')
+    # initiated_items_df.to_excel(os.path.join(output_dir, "initiated_items.xlsx"), index=False, engine='openpyxl')
+
+    # # Step 2: Build an index of items with embeddings around the Approved items
+    # approved_items = pd.read_excel(os.path.join(output_dir, "approved_items.xlsx"), engine="openpyxl")
+    # logger.info(f"Number of approved items: {len(approved_items)}")
+    # create_embedding_index(approved_items, search_client)
 
     # Step 3: Predict the Class, PBH, Analytical_Hierarchy, and save the results
-    initiated_october_items = pd.read_excel("initiated_october_items.xlsx", engine="openpyxl").head(100)
-    predictions = predict_classifications(initiated_october_items, search_client, client)
-    predictions.to_excel("predicted_results.xlsx", index=False, engine="openpyxl")
+    initiated_items = pd.read_excel(os.path.join(output_dir, "initiated_items.xlsx"), engine="openpyxl")
+    predictions = predict_classifications(initiated_items, search_client)
+    predictions.to_excel(os.path.join(output_dir, "predicted_results.xlsx"), index=False, engine="openpyxl")
 
-    # Step 4: Evaluate the predictions
-    predictions = pd.read_excel("predicted_results.xlsx", engine="openpyxl").head(100)
-    accuracy = evaluate_predictions(initiated_october_items, predictions, approved_october_items)
-    print("Accuracy Summary:", accuracy)
+    # # Step 4: Evaluate the predictions
+    # predictions = pd.read_excel(os.path.join(output_dir, "predicted_results.xlsx"), engine="openpyxl").head(100)
+    # accuracy = evaluate_predictions(initiated_items, predictions, approved_items)
+    # logger.info("Accuracy Summary:")
+    # logger.info(accuracy)
 
 if __name__ == "__main__":
-    # Apply this function to extract matching rows for each item
-   
     main()
