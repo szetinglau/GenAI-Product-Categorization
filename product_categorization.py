@@ -13,6 +13,7 @@ import numpy as np
 import requests, json, os
 import time
 import logging
+import openpyxl  # Added import for Excel formatting
 
 from azure.core.exceptions import HttpResponseError
 from azure.search.documents import SearchClient
@@ -526,139 +527,138 @@ def create_mismatch_summary(detailed_comparison, item_hierarchy):
 
 
 def compute_accuracies(detailed_comparison_df):
-    """
-    Compute field accuracies and generate an accuracy summary DataFrame.
-    """
+    # ...existing accuracy summary calculations...
     class_accuracy = (detailed_comparison_df["Class_Name_predicted"] == detailed_comparison_df["Class_Name_actual"]).mean()
     pbh_accuracy = (detailed_comparison_df["PBH_predicted"] == detailed_comparison_df["PBH_actual"]).mean()
     analytical_accuracy = (detailed_comparison_df["Analytical_Hierarchy_predicted"] == detailed_comparison_df["Analytical_Hierarchy_actual"]).mean()
 
-    # Calculate the percentage of Analytical Hierarchy not in the hierarchy file
-    analytical_hierarchy_not_in_file_percentage = detailed_comparison_df["Analytical_Hierarchy_CD_Not_In_Hierarchy_File"].mean()
-
-    # Create a DataFrame for the accuracy summary
     accuracy_summary = pd.DataFrame({
         "Metric": ["Class Accuracy", "PBH Accuracy", "Analytical Hierarchy Accuracy", "Analytical Hierarchy Not In File Percentage"],
-        "Value": [class_accuracy, pbh_accuracy, analytical_accuracy, analytical_hierarchy_not_in_file_percentage]
+        "Value": [
+            class_accuracy,
+            pbh_accuracy,
+            analytical_accuracy,
+            detailed_comparison_df["Analytical_Hierarchy_CD_Not_In_Hierarchy_File"].mean()
+        ]
     })
     
     # Build Category Performance Summary
     category_counts = detailed_comparison_df.groupby("Analytical_Hierarchy_actual")["Item_Num"].count()
-    
-    # Calculate correct classifications per category
     correct_classifications = detailed_comparison_df[detailed_comparison_df["Analytical_Hierarchy_Match"] == True].groupby("Analytical_Hierarchy_actual")["Item_Num"].count()
-    
-    # Merge results into a single DataFrame
     category_performance_df = pd.DataFrame({
         "Total Items": category_counts,
         "Correctly Classified": correct_classifications
     }).fillna(0)
-    
-    # Calculate accuracy percentage for each category
     category_performance_df["Accuracy (%)"] = (category_performance_df["Correctly Classified"] / category_performance_df["Total Items"]) * 100
-
-    # Reset index and rename columns
     category_performance_df = category_performance_df.reset_index().rename(columns={"Analytical_Hierarchy_actual": "Analytical_Hierarchy"})
-    
-    # Add item numbers for trace back
-    category_performance_df["Item_Numbers"] = category_performance_df["Analytical_Hierarchy"].apply(
-        lambda hierarchy: ", ".join(detailed_comparison_df[detailed_comparison_df["Analytical_Hierarchy_actual"] == hierarchy]["Item_Num"].astype(str).tolist())
-    )
-    
-    # Reorder columns
-    category_performance_df = category_performance_df[["Analytical_Hierarchy", "Total Items", "Correctly Classified", "Accuracy (%)", "Item_Numbers"]]
-    
-    # Sort by accuracy descending
     category_performance_df = category_performance_df.sort_values(by="Accuracy (%)", ascending=False)
-    
-    # Ensure the product count matches the Detailed Comparison tab
-    detailed_items_count = detailed_comparison_df["Item_Num"].nunique()
-    performance_items_count = category_performance_df["Total Items"].sum()
-    if detailed_items_count != performance_items_count:
-        logger.warning(f"Product count mismatch! Detailed Comparison count: {detailed_items_count}, Performance count: {performance_items_count}")
-        
-    # Count the number of unique categories
-    num_categories = detailed_comparison_df["Analytical_Hierarchy_actual"].nunique()
-    logger.info(f"Unique categories: {num_categories}")
 
-    return class_accuracy, pbh_accuracy, analytical_accuracy, accuracy_summary, category_performance_df
+    # Compute hierarchy level accuracies
+    hl1 = compute_hierarchy_level_accuracy(detailed_comparison_df, 1)
+    hl2 = compute_hierarchy_level_accuracy(detailed_comparison_df, 2)
+    hl3 = compute_hierarchy_level_accuracy(detailed_comparison_df, 3)
+
+    return class_accuracy, pbh_accuracy, analytical_accuracy, accuracy_summary, category_performance_df, hl1, hl2, hl3
+
+def compute_hierarchy_level_accuracy(detailed_comparison_df, level):
+    """
+    Compute breakdown at the specified hierarchy level.
+    """
+    column_name = f"Hierarchy_Level_{level}"
+    detailed_comparison_df[column_name] = detailed_comparison_df["Analytical_Hierarchy_actual"].apply(
+        lambda x: ">>".join(str(x).split(">>")[:level]) if pd.notnull(x) and len(str(x).split(">>")) >= level else "Unknown"
+    )
+    hl = detailed_comparison_df.groupby(column_name).agg(
+        Total_Items=("Item_Num", "count"),
+        Correctly_Classified=("Analytical_Hierarchy_Match", "sum")
+    )
+    hl["Accuracy (%)"] = (hl["Correctly_Classified"] / hl["Total_Items"]) * 100
+    hl = hl.sort_values(by="Accuracy (%)", ascending=False)
+    hl = hl[[column_name, "Total_Items", "Correctly_Classified", "Accuracy (%)"]]
+    return hl
 
 
-def save_evaluation_excel(initiated_items, approved_items, predictions, detailed_comparison, mismatch_summary, accuracy_summary, category_performance_df):
+def save_evaluation_excel(initiated_items, approved_items, predictions, detailed_comparison, mismatch_summary, accuracy_summary, category_performance_df, hl1, hl2, hl3):
     """
     Write the evaluation results to an Excel file with multiple tabs and apply conditional formatting.
     """
     output_path = os.path.join(output_dir, "evaluation_results.xlsx")
     with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
-        # Save DataFrames to different sheets
         initiated_items.to_excel(writer, sheet_name="Initiated Items", index=False)
         approved_items.to_excel(writer, sheet_name="Approved Items", index=False)
         predictions.to_excel(writer, sheet_name="Predicted Items", index=False)
         detailed_comparison.to_excel(writer, sheet_name="Detailed Comparison", index=False)
         mismatch_summary.to_excel(writer, sheet_name="Mismatch Summary", index=False)
         accuracy_summary.to_excel(writer, sheet_name="Accuracy Summary", index=False)
-        category_performance_df.to_excel(writer, sheet_name="Category Performance", index=False)
+        category_performance_df.to_excel(writer, sheet_name="Individual Hierarchy Accuracy", index=False)
+        hl1.to_excel(writer, sheet_name="Hierarchy Level 1", index=False)
+        hl2.to_excel(writer, sheet_name="Hierarchy Level 2", index=False)
+        hl3.to_excel(writer, sheet_name="Hierarchy Level 3", index=False)
 
-        workbook = writer.book
-        detailed_ws = writer.sheets["Detailed Comparison"]
-        mismatch_ws = writer.sheets["Mismatch Summary"]
+        format_eval_results(detailed_comparison, mismatch_summary, writer)
+
+    # After writing, apply auto-formatting to the Excel file
+    auto_format_excel(output_path)
+    print(f"Evaluation results saved to: {output_path}")
+
+
+def format_eval_results(detailed_comparison, mismatch_summary, writer):
+    workbook = writer.book
+    detailed_ws = writer.sheets["Detailed Comparison"]
+    mismatch_ws = writer.sheets["Mismatch Summary"]
 
         # Define formats
-        mismatch_format = workbook.add_format({'bg_color': '#FFCCCC'})
-        red_format = workbook.add_format({'font_color': 'red'})
-        blue_format = workbook.add_format({'font_color': 'blue'})
+    mismatch_format = workbook.add_format({'bg_color': '#FFCCCC'})
+    red_format = workbook.add_format({'font_color': 'red'})
+    blue_format = workbook.add_format({'font_color': 'blue'})
 
         # Apply the format to mismatched cells in Detailed Comparison
-        for idx, row in detailed_comparison.iterrows():
-            if not row["Class_Name_Match"]:
-                detailed_ws.write(idx + 1, detailed_comparison.columns.get_loc("Class_Name_predicted"), row["Class_Name_predicted"], mismatch_format)
-                detailed_ws.write(idx + 1, detailed_comparison.columns.get_loc("Class_Name_actual"), row["Class_Name_actual"], mismatch_format)
-            if not row["PBH_Match"]:
-                detailed_ws.write(idx + 1, detailed_comparison.columns.get_loc("PBH_predicted"), row["PBH_predicted"], mismatch_format)
-                detailed_ws.write(idx + 1, detailed_comparison.columns.get_loc("PBH_actual"), row["PBH_actual"], mismatch_format)
-            if not row["Analytical_Hierarchy_Match"]:
-                detailed_ws.write(idx + 1, detailed_comparison.columns.get_loc("Analytical_Hierarchy_predicted"), row["Analytical_Hierarchy_predicted"], mismatch_format)
-                detailed_ws.write(idx + 1, detailed_comparison.columns.get_loc("Analytical_Hierarchy_actual"), row["Analytical_Hierarchy_actual"], mismatch_format)
-            if not row["Analytical_Hierarchy_CD_Match"]:
-                detailed_ws.write(idx + 1, detailed_comparison.columns.get_loc("Analytical_Hierarchy_CD_predicted"), row["Analytical_Hierarchy_CD_predicted"], mismatch_format)
-                detailed_ws.write(idx + 1, detailed_comparison.columns.get_loc("Analytical_Hierarchy_CD_actual"), row["Analytical_Hierarchy_CD_actual"], mismatch_format)
-            if row["Analytical_Hierarchy_CD_Not_In_Hierarchy_File"]:
-                detailed_ws.write(idx + 1, detailed_comparison.columns.get_loc("Analytical_Hierarchy_CD_actual"), row["Analytical_Hierarchy_CD_actual"], red_format)
-                detailed_ws.write(idx + 1, detailed_comparison.columns.get_loc("Analytical_Hierarchy_CD_Not_In_Hierarchy_File"), row["Analytical_Hierarchy_CD_Not_In_Hierarchy_File"], mismatch_format)
+    for idx, row in detailed_comparison.iterrows():
+        if not row["Class_Name_Match"]:
+            detailed_ws.write(idx + 1, detailed_comparison.columns.get_loc("Class_Name_predicted"), row["Class_Name_predicted"], mismatch_format)
+            detailed_ws.write(idx + 1, detailed_comparison.columns.get_loc("Class_Name_actual"), row["Class_Name_actual"], mismatch_format)
+        if not row["PBH_Match"]:
+            detailed_ws.write(idx + 1, detailed_comparison.columns.get_loc("PBH_predicted"), row["PBH_predicted"], mismatch_format)
+            detailed_ws.write(idx + 1, detailed_comparison.columns.get_loc("PBH_actual"), row["PBH_actual"], mismatch_format)
+        if not row["Analytical_Hierarchy_Match"]:
+            detailed_ws.write(idx + 1, detailed_comparison.columns.get_loc("Analytical_Hierarchy_predicted"), row["Analytical_Hierarchy_predicted"], mismatch_format)
+            detailed_ws.write(idx + 1, detailed_comparison.columns.get_loc("Analytical_Hierarchy_actual"), row["Analytical_Hierarchy_actual"], mismatch_format)
+        if not row["Analytical_Hierarchy_CD_Match"]:
+            detailed_ws.write(idx + 1, detailed_comparison.columns.get_loc("Analytical_Hierarchy_CD_predicted"), row["Analytical_Hierarchy_CD_predicted"], mismatch_format)
+            detailed_ws.write(idx + 1, detailed_comparison.columns.get_loc("Analytical_Hierarchy_CD_actual"), row["Analytical_Hierarchy_CD_actual"], mismatch_format)
+        if row["Analytical_Hierarchy_CD_Not_In_Hierarchy_File"]:
+            detailed_ws.write(idx + 1, detailed_comparison.columns.get_loc("Analytical_Hierarchy_CD_actual"), row["Analytical_Hierarchy_CD_actual"], red_format)
+            detailed_ws.write(idx + 1, detailed_comparison.columns.get_loc("Analytical_Hierarchy_CD_Not_In_Hierarchy_File"), row["Analytical_Hierarchy_CD_Not_In_Hierarchy_File"], mismatch_format)
 
         # Apply the format to mismatched cells in Mismatch Summary
-        for idx, row in mismatch_summary.iterrows():
-            if not row["Class_Name_Match"]:
-                mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("Class_Name_predicted"), row["Class_Name_predicted"], mismatch_format)
-                mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("Class_Name_actual"), row["Class_Name_actual"], mismatch_format)
-            if not row["PBH_Match"]:
-                mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("PBH_predicted"), row["PBH_predicted"], mismatch_format)
-                mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("PBH_actual"), row["PBH_actual"], mismatch_format)
-            if not row["Analytical_Hierarchy_Match"]:
-                mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("Analytical_Hierarchy_predicted"), row["Analytical_Hierarchy_predicted"], mismatch_format)
-                mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("Analytical_Hierarchy_actual"), row["Analytical_Hierarchy_actual"], mismatch_format)
-            if not row["Analytical_Hierarchy_CD_Match"]:
-                mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("Analytical_Hierarchy_CD_predicted"), row["Analytical_Hierarchy_CD_predicted"], mismatch_format)
-                mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("Analytical_Hierarchy_CD_actual"), row["Analytical_Hierarchy_CD_actual"], mismatch_format)
-            if row["Analytical_Hierarchy_CD_Not_In_Hierarchy_File"]:
-                mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("Analytical_Hierarchy_CD_actual"), row["Analytical_Hierarchy_CD_actual"], red_format)
-                mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("Analytical_Hierarchy_CD_Not_In_Hierarchy_File"), row["Analytical_Hierarchy_CD_Not_In_Hierarchy_File"], mismatch_format)
-
-
+    for idx, row in mismatch_summary.iterrows():
+        if not row["Class_Name_Match"]:
+            mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("Class_Name_predicted"), row["Class_Name_predicted"], mismatch_format)
+            mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("Class_Name_actual"), row["Class_Name_actual"], mismatch_format)
+        if not row["PBH_Match"]:
+            mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("PBH_predicted"), row["PBH_predicted"], mismatch_format)
+            mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("PBH_actual"), row["PBH_actual"], mismatch_format)
+        if not row["Analytical_Hierarchy_Match"]:
+            mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("Analytical_Hierarchy_predicted"), row["Analytical_Hierarchy_predicted"], mismatch_format)
+            mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("Analytical_Hierarchy_actual"), row["Analytical_Hierarchy_actual"], mismatch_format)
+        if not row["Analytical_Hierarchy_CD_Match"]:
+            mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("Analytical_Hierarchy_CD_predicted"), row["Analytical_Hierarchy_CD_predicted"], mismatch_format)
+            mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("Analytical_Hierarchy_CD_actual"), row["Analytical_Hierarchy_CD_actual"], mismatch_format)
+        if row["Analytical_Hierarchy_CD_Not_In_Hierarchy_File"]:
+            mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("Analytical_Hierarchy_CD_actual"), row["Analytical_Hierarchy_CD_actual"], red_format)
+            mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("Analytical_Hierarchy_CD_Not_In_Hierarchy_File"), row["Analytical_Hierarchy_CD_Not_In_Hierarchy_File"], mismatch_format)
 
         # Conditional formatting for Mismatch Summary sheet with rich diff formatting
-        for i, row in mismatch_summary.iterrows():
-            for field in ["Class_Name", "PBH", "Analytical_Hierarchy", "Analytical_Hierarchy_CD"]:
-                col = mismatch_summary.columns.get_loc(f"{field}_Diff")
+    for i, row in mismatch_summary.iterrows():
+        for field in ["Class_Name", "PBH", "Analytical_Hierarchy", "Analytical_Hierarchy_CD"]:
+            col = mismatch_summary.columns.get_loc(f"{field}_Diff")
                 # For hierarchical field, apply diff highlighting if mismatch occurs
-                if field == "Analytical_Hierarchy" and not row[f"{field}_Match"]:
-                    rich_text = highlight_hierarchy_diff(row[f"{field}_predicted"], row[f"{field}_actual"], red_format, blue_format)
-                    mismatch_ws.write_rich_string(i + 1, col, *rich_text)
-                elif not row[f"{field}_Match"]:
-                    rich_text = diff_format_words(row[f"{field}_predicted"], row[f"{field}_actual"], red_format, blue_format)
-                    mismatch_ws.write_rich_string(i + 1, col, *rich_text)
-
-    print(f"Evaluation results saved to: {output_path}")
+            if field == "Analytical_Hierarchy" and not row[f"{field}_Match"]:
+                rich_text = highlight_hierarchy_diff(row[f"{field}_predicted"], row[f"{field}_actual"], red_format, blue_format)
+                mismatch_ws.write_rich_string(i + 1, col, *rich_text)
+            elif not row[f"{field}_Match"]:
+                rich_text = diff_format_words(row[f"{field}_predicted"], row[f"{field}_actual"], red_format, blue_format)
+                mismatch_ws.write_rich_string(i + 1, col, *rich_text)
 
 
 def evaluate_predictions(initiated_items, predicted_items, approved_items):
@@ -689,11 +689,11 @@ def evaluate_predictions(initiated_items, predicted_items, approved_items):
     mismatch_summary_df = mismatch_summary_df.replace([np.nan, np.inf, -np.inf], '')
     
     # Compute accuracies and format summary
-    class_acc, pbh_acc, analytical_acc, accuracy_summary, category_performance_df = compute_accuracies(detailed_comparison_df)
+    class_acc, pbh_acc, analytical_acc, accuracy_summary, category_performance_df, hl1, hl2, hl3 = compute_accuracies(detailed_comparison_df)
 
     # Write all results to an Excel file with multiple tabs and conditional formatting
     save_evaluation_excel(initiated_items, approved_items, predictions_df, detailed_comparison_df,
-                            mismatch_summary_df, accuracy_summary, category_performance_df)
+                            mismatch_summary_df, accuracy_summary, category_performance_df, hl1, hl2, hl3)
 
     return {
         "Class Accuracy": class_acc,
@@ -755,6 +755,25 @@ def highlight_hierarchy_diff(predicted, actual, red_format, blue_format):
         rich_text = rich_text[:-1]
     return rich_text
 
+def auto_format_excel(file_path):
+    # Automatically adjust column width, enable filters and freeze the top row
+    wb = openpyxl.load_workbook(file_path)
+    for sheet in wb.worksheets:
+        # Adjust column widths
+        for col in sheet.columns:
+            max_length = 0
+            col_letter = col[0].column_letter
+            for cell in col:
+                if cell.value:
+                    max_length = max(max_length, len(str(cell.value)))
+            sheet.column_dimensions[col_letter].width = max_length + 2
+        # Enable AutoFilter for the range
+        if sheet.max_row > 1 and sheet.max_column > 1:
+            sheet.auto_filter.ref = sheet.dimensions
+        # Freeze the top row
+        sheet.freeze_panes = "A2"
+    wb.save(file_path)
+    print(f"Excel file '{file_path}' formatted successfully.")
 
 def construct_query_text(row):
     """
@@ -968,7 +987,7 @@ def main():
     # Step 2: Build an index of items with embeddings around the Approved items
     # logger.info(f"Number of approved items: {len(approved_items_df)}")
     # create_embedding_index(approved_items_df, search_client)
-    # # TODO break up creat embedding index function into creating the embeddings, preparing the documents,  creating the index, and uploading the documents.
+    # # TODO break up create embedding index function into creating the embeddings, preparing the documents,  creating the index, and uploading the documents.
 
     # Step 3: Predict the Class, PBH, Analytical_Hierarchy, and save the results
     # initiated_items = pd.read_excel(os.path.join(output_dir, "initiated_items.xlsx"), engine="openpyxl")
