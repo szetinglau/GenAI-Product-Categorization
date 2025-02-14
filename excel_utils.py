@@ -1,3 +1,4 @@
+import difflib
 import pandas as pd
 import os
 import openpyxl
@@ -5,6 +6,7 @@ import openpyxl
 def save_evaluation_excel(initiated_items, approved_items, predictions, detailed_comparison, mismatch_summary, accuracy_summary, category_performance_df, hl1, hl2, hl3, output_dir):
     output_path = os.path.join(output_dir, "evaluation_results.xlsx")
     with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
+        # Write all DataFrames to their respective sheets
         initiated_items.to_excel(writer, sheet_name="Initiated Items", index=False)
         approved_items.to_excel(writer, sheet_name="Approved Items", index=False)
         predictions.to_excel(writer, sheet_name="Predicted Items", index=False)
@@ -63,6 +65,58 @@ def format_eval_results(detailed_comparison, mismatch_summary, writer):
         if row["Analytical_Hierarchy_CD_Not_In_Hierarchy_File"]:
             mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("Analytical_Hierarchy_CD_actual"), row["Analytical_Hierarchy_CD_actual"], red_format)
             mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("Analytical_Hierarchy_CD_Not_In_Hierarchy_File"), row["Analytical_Hierarchy_CD_Not_In_Hierarchy_File"], mismatch_format)
+
+    # Conditional formatting for Mismatch Summary sheet with rich diff formatting
+    for i, row in mismatch_summary.iterrows():
+        for field in ["Class_Name", "PBH", "Analytical_Hierarchy", "Analytical_Hierarchy_CD"]:
+            col = mismatch_summary.columns.get_loc(f"{field}_Diff")
+                # For hierarchical field, apply diff highlighting if mismatch occurs
+            if field == "Analytical_Hierarchy" and not row[f"{field}_Match"]:
+                rich_text = highlight_hierarchy_diff(row[f"{field}_predicted"], row[f"{field}_actual"], red_format, blue_format)
+                mismatch_ws.write_rich_string(i + 1, col, *rich_text)
+            elif not row[f"{field}_Match"]:
+                rich_text = diff_format_words(row[f"{field}_predicted"], row[f"{field}_actual"], red_format, blue_format)
+                mismatch_ws.write_rich_string(i + 1, col, *rich_text)
+
+def diff_format_words(predicted, actual, red_format, blue_format):
+    # Use difflib to get a diff between actual and predicted words.
+    actual_words = actual.split()
+    predicted_words = predicted.split()
+    diff = list(difflib.ndiff(actual_words, predicted_words))
+    rich_text = []
+    for token in diff:
+        if token.startswith('- '):
+            # Removed word (actual): highlight in red
+            rich_text.extend([red_format, token[2:] + " "])
+        elif token.startswith('+ '):
+            # Added word (predicted): highlight in blue
+            rich_text.extend([blue_format, f"{token[2:]} "])  # Removed (+) prefix and fixed color
+        else:
+            # Common word: normal text
+            rich_text.append(token[2:] + " ")
+    return rich_text
+
+def highlight_hierarchy_diff(predicted, actual, red_format, blue_format):
+    # Split each hierarchy into segments.
+    pred_segs = [seg.strip() for seg in predicted.split(">>")]
+    act_segs = [seg.strip() for seg in actual.split(">>")]
+    rich_text = []
+    # Loop over each segment and highlight differences.
+    for i in range(max(len(pred_segs), len(act_segs))):
+        pred_seg = pred_segs[i] if i < len(pred_segs) else ""
+        act_seg = act_segs[i] if i < len(act_segs) else ""
+        if pred_seg == act_seg:
+            rich_text.append(act_seg + ">>")
+        else:
+            # Highlight diff between the segments.
+            seg_diff = diff_format_words(pred_seg, act_seg, red_format, blue_format)
+            rich_text.extend(seg_diff)
+            if i < len(act_segs) - 1:
+                rich_text.append(">>")
+    # Remove trailing separator if any.
+    if rich_text and rich_text[-1] == ">>":
+        rich_text = rich_text[:-1]
+    return rich_text
 
 def auto_format_excel(file_path):
     wb = openpyxl.load_workbook(file_path)

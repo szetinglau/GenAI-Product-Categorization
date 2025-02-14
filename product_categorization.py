@@ -13,7 +13,7 @@ import numpy as np
 import requests, json, os
 import time
 import logging
-import openpyxl  # Added import for Excel formatting
+import openpyxl
 
 from azure.core.exceptions import HttpResponseError
 from azure.search.documents import SearchClient
@@ -572,6 +572,7 @@ def compute_hierarchy_level_accuracy(detailed_comparison_df, level):
         Total_Items=("Item_Num", "count"),
         Correctly_Classified=("Analytical_Hierarchy_Match", "sum")
     )
+    hl = hl.reset_index()  # reset the index so the column becomes a proper column
     hl["Accuracy (%)"] = (hl["Correctly_Classified"] / hl["Total_Items"]) * 100
     hl = hl.sort_values(by="Accuracy (%)", ascending=False)
     hl = hl[[column_name, "Total_Items", "Correctly_Classified", "Accuracy (%)"]]
@@ -648,7 +649,7 @@ def format_eval_results(detailed_comparison, mismatch_summary, writer):
             mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("Analytical_Hierarchy_CD_actual"), row["Analytical_Hierarchy_CD_actual"], red_format)
             mismatch_ws.write(idx + 1, mismatch_summary.columns.get_loc("Analytical_Hierarchy_CD_Not_In_Hierarchy_File"), row["Analytical_Hierarchy_CD_Not_In_Hierarchy_File"], mismatch_format)
 
-        # Conditional formatting for Mismatch Summary sheet with rich diff formatting
+    # Conditional formatting for Mismatch Summary sheet with rich diff formatting
     for i, row in mismatch_summary.iterrows():
         for field in ["Class_Name", "PBH", "Analytical_Hierarchy", "Analytical_Hierarchy_CD"]:
             col = mismatch_summary.columns.get_loc(f"{field}_Diff")

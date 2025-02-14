@@ -53,9 +53,12 @@ def main():
     # Predict classifications
     # predictions = create_embeddings_and_documents(initiated_items_df, aoai_client, text_embedding_model_name, output_dir)
 
-    # Evaluate predictions
+    # Evaluate predictions with both reference DataFrames
     predictions_df = pd.read_excel(os.path.join(output_dir, "predicted_results.xlsx"), engine="openpyxl")
-    accuracy = evaluate_predictions(initiated_items_df, predictions_df, approved_items_df, item_hierarchy_df, logger, output_dir)
+    accuracy = evaluate_predictions(
+        initiated_items_df, predictions_df, approved_items_df, 
+        item_hierarchy_df, class_pbh_df, logger, output_dir
+    )
     logger.info("Accuracy Summary:")
     logger.info(accuracy)
 
