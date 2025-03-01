@@ -1,3 +1,5 @@
 .env
 outputs-old
 outputs
+.clineignore
+.DS_Store
